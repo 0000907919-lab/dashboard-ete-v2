@@ -13,15 +13,23 @@ import re
 st.set_page_config(page_title="Dashboard Operacional ETE", layout="wide")
 
 # =========================
-# GOOGLE SHEETS – ABA 1 (Respostas ao Formulário / Operacional)
+# GOOGLE SHEETS – ABA 1 (Operacional / Formulário)
 # =========================
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
-GID_FORM = "1283870792"  # aba com o formulário operacional
+GID_FORM = "1283870792"
 CSV_URL_FORM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_FORM}"
 
-# Carrega a planilha (df = operacional)
+# Carrega a planilha operacional
 df = pd.read_csv(CSV_URL_FORM)
 df.columns = [str(c).strip() for c in df.columns]
+
+# =========================
+# PARÂMETROS DE REGRA DE STATUS
+# =========================
+# Tudo que for numérico em VÁLVULAS e SOPRADORES:
+#   > limiar -> OK ; <= limiar -> OFF
+BLOWER_O2_OK_THRESHOLD = 0.0     # ex.: 0.2 para exigir > 0,2
+VALVE_NUMERIC_OK_THRESHOLD = 0.0 # ex.: 0.0 (0=OFF, >0=OK)
 
 # =========================
 # NORMALIZAÇÃO / AUXILIARES
@@ -34,7 +42,6 @@ def _strip_accents(s: str) -> str:
     )
 
 def _slug(s: str) -> str:
-    # gera chave curta para evitar IDs duplicados em gráficos plotly
     return _strip_accents(str(s).lower()).replace(" ", "-").replace("–", "-").replace("/", "-")
 
 cols_lower_noacc = [_strip_accents(c.lower()) for c in df.columns]
@@ -48,10 +55,10 @@ KW_VALVULA = ["valvula", "válvula"]
 KW_SOPRADOR = ["soprador", "sopradores", "oxigenacao", "oxigenação"]
 
 # Grupos adicionais
-KW_NIVEIS_OUTROS = ["nivel", "nível"]  # será filtrado excluindo caçamba
+KW_NIVEIS_OUTROS = ["nivel", "nível"]  # exclui caçambas
 KW_VAZAO = ["vazao", "vazão"]
-KW_PH = ["ph ", " ph"]                 # espaços para evitar bater em 'oxipH'
-KW_SST = ["sst ", " sst", "ss "]       # inclui SS/SST
+KW_PH = ["ph ", " ph"]                 # evita bater em oxiPH
+KW_SST = ["sst ", " sst", "ss "]
 KW_DQO = ["dqo ", " dqo"]
 KW_ESTADOS = ["tridecanter", "desvio", "tempo de descarte", "volante"]
 
@@ -73,18 +80,16 @@ def to_float_ptbr(x):
         return np.nan
 
 def last_valid_raw(df_local, col):
-    """Último valor não vazio de uma coluna."""
+    """Último valor não vazio."""
     s = pd.Series(df_local[col])
-    # Se for numérico, já retorna o último não nulo
     if pd.api.types.is_numeric_dtype(s):
         s = s.dropna()
         return None if s.empty else s.iloc[-1]
-    # Se for texto, limpa vazios
     s = s.replace(r"^\s*$", np.nan, regex=True).dropna()
     return None if s.empty else s.iloc[-1]
 
 def _filter_columns_by_keywords(all_cols_norm_noacc, keywords):
-    """Retorna nomes originais das colunas que contenham QUALQUER keyword."""
+    """Nomes originais de colunas que contenham QUALQUER keyword."""
     kws = [_strip_accents(k.lower()) for k in keywords]
     selected_norm = []
     for c_norm in all_cols_norm_noacc:
@@ -92,12 +97,15 @@ def _filter_columns_by_keywords(all_cols_norm_noacc, keywords):
             selected_norm.append(c_norm)
     return [COLMAP[c] for c in selected_norm]
 
-def _extract_number(base: str) -> str:
-    m = re.search(r'(\d+)', base)
+def _extract_number_text(text: str) -> str:
+    m = re.search(r'(\d+)', text or "")
     return m.group(1) if m else ""
 
+def _extract_number_int(text: str) -> int:
+    n = _extract_number_text(text)
+    return int(n) if n else 9999
+
 def _remove_brackets(text: str) -> str:
-    # Remove qualquer coisa após '['
     return text.split("[", 1)[0].strip()
 
 def _units_from_label(label: str) -> str:
@@ -118,22 +126,13 @@ def re_replace_case_insensitive(s, pattern, repl):
     return _re.sub(pattern, repl, s, flags=_re.IGNORECASE)
 
 def _nome_exibicao(label_original: str) -> str:
-    """
-    Padroniza nomes para:
-      - "Nível da caçamba X"
-      - "Soprador de nitrificação X" / "Soprador de MBBR X"
-      - "Válvula de nitrificação X" / "Válvula de MBBR X"
-      - Demais indicadores: remove colchetes e devolve texto limpo
-    """
     base_clean = _remove_brackets(label_original)
     base = _strip_accents(base_clean.lower()).strip()
-    num = _extract_number(base)
+    num = _extract_number_text(base)
 
-    # Caçambas
     if "cacamba" in base:
         return f"Nível da caçamba {num}" if num else "Nível da caçamba"
 
-    # Sopradores (inclui Oxigenação)
     if ("soprador" in base) or ("oxigenacao" in base):
         if any(k in base for k in KW_NITR):
             return f"Soprador de nitrificação {num}" if num else "Soprador de nitrificação"
@@ -141,7 +140,6 @@ def _nome_exibicao(label_original: str) -> str:
             return f"Soprador de MBBR {num}" if num else "Soprador de MBBR"
         return f"Soprador {num}" if num else "Soprador"
 
-    # Válvulas
     if "valvula" in base:
         if any(k in base for k in KW_NITR):
             return f"Válvula de nitrificação {num}" if num else "Válvula de nitrificação"
@@ -149,7 +147,6 @@ def _nome_exibicao(label_original: str) -> str:
             return f"Válvula de MBBR {num}" if num else "Válvula de MBBR"
         return f"Válvula {num}" if num else "Válvula"
 
-    # Ajustes de capitalização comuns (pH, DQO, SST, Vazão, Nível, MIX)
     txt = base_clean
     replacements = {
         "ph": "pH", "dqo": "DQO", "sst": "SST", "ss ": "SS ",
@@ -160,7 +157,6 @@ def _nome_exibicao(label_original: str) -> str:
     }
     for k, v in replacements.items():
         txt = re_replace_case_insensitive(txt, k, v)
-
     return txt.strip()
 
 # =========================
@@ -190,11 +186,9 @@ def render_cacambas_gauges(title, n_cols=4):
 
     n_rows = int(np.ceil(len(cols_orig) / n_cols))
     fig = make_subplots(
-        rows=n_rows,
-        cols=n_cols,
+        rows=n_rows, cols=n_cols,
         specs=[[{"type": "indicator"}] * n_cols for _ in range(n_rows)],
-        horizontal_spacing=0.05,
-        vertical_spacing=0.15
+        horizontal_spacing=0.05, vertical_spacing=0.15
     )
     for i, c in enumerate(cols_orig):
         raw = last_valid_raw(df, c)
@@ -207,35 +201,79 @@ def render_cacambas_gauges(title, n_cols=4):
     st.plotly_chart(fig, use_container_width=True, key=f"plot-gauges-{_slug(title)}")
 
 # =========================
-# TILES (cards genéricos)
+# TILES (cards) – com regra numérica=OK p/ Válvulas & Sopradores
 # =========================
-def _tile_color_and_text(raw_value, val_num, label, force_neutral_numeric=False):
-    """Define cor e texto do card conforme tipo de dado."""
-    if raw_value is None:
-        return "#9E9E9E", "—"
+def _status_from_raw_for_group(raw, group_type: str):
+    """
+    Regra: numérico => OK/ OFF por limiar; texto => OK/NOK/OFF.
+    group_type: 'soprador'|'valvula'|'outros'
+    """
+    if raw is None:
+        return "—", None
 
-    # numérico
-    if not np.isnan(val_num):
-        units = _units_from_label(label)
-        if units == "%":
-            fill = "#43A047" if val_num >= 70 else "#FB8C00" if val_num >= 30 else "#E53935"
-            return fill, f"{val_num:.1f}%"
+    s = str(raw).strip()
+    v = to_float_ptbr(s)
+    if not np.isnan(v):
+        if group_type == "soprador":
+            return ("OK" if v > BLOWER_O2_OK_THRESHOLD else "OFF"), v
+        if group_type == "valvula":
+            return ("OK" if v > VALVE_NUMERIC_OK_THRESHOLD else "OFF"), v
+        # outros numéricos mantêm exibição numérica
+        return None, v
+
+    # texto
+    t = _strip_accents(s.lower())
+    if t in ["ok", "on", "ligado", "rodando", "aberto"]:
+        return "OK", None
+    if t in ["nok", "falha", "erro"]:
+        return "NOK", None
+    if t in ["off", "desligado", "fechado", "parado"]:
+        return "OFF", None
+    return s.upper(), None
+
+def _tile_color_and_text(raw_value, label, interpret_numeric_as_status: bool):
+    """Retorna (fill, txt) conforme a regra solicitada."""
+    if interpret_numeric_as_status:
+        # Distingue grupo pela label
+        base = _strip_accents(label.lower())
+        group_type = "soprador" if ("soprador" in base or "oxigenacao" in base) else ("valvula" if "valvula" in base else "outros")
+        stt, v = _status_from_raw_for_group(raw_value, group_type)
+
+        if stt in ["OK", "OFF", "NOK"]:
+            fill = {"OK": "#43A047", "OFF": "#E53935", "NOK": "#E53935"}[stt]
+            return fill, stt
+        elif stt == "—":
+            return "#9E9E9E", "—"
+        elif stt is not None:  # outro texto
+            return "#FB8C00", stt
         else:
-            if force_neutral_numeric:
-                return "#546E7A", f"{val_num:.2f}{units}"
-            fill = "#43A047" if val_num >= 70 else "#FB8C00" if val_num >= 30 else "#E53935"
-            return fill, f"{val_num:.1f}{units}"
+            # numérico mas sem status (não deve acontecer aqui)
+            v = v if v is not None else np.nan
+            if np.isnan(v):
+                return "#9E9E9E", "—"
+            # fallback: verde se >0
+            return ("#43A047" if v > 0 else "#E53935"), f"{v:.2f}"
+    else:
+        # Comportamento antigo para os demais grupos
+        v = to_float_ptbr(raw_value)
+        if raw_value is None:
+            return "#9E9E9E", "—"
+        if not np.isnan(v):
+            units = _units_from_label(label)
+            if units == "%":
+                fill = "#43A047" if v >= 70 else "#FB8C00" if v >= 30 else "#E53935"
+                return fill, f"{v:.1f}%"
+            # neutro numérico
+            return "#546E7A", f"{v:.2f}{units}"
+        # texto
+        t = _strip_accents(str(raw_value).strip().lower())
+        if t in ["ok", "ligado", "aberto", "rodando", "on"]:
+            return "#43A047", "OK"
+        if t in ["nok", "falha", "erro", "fechado", "off"]:
+            return "#E53935", t.upper()
+        return "#FB8C00", str(raw_value)
 
-    # texto (OK/erro etc)
-    txt = str(raw_value).strip()
-    t = _strip_accents(txt.lower())
-    if t in ["ok", "ligado", "aberto", "rodando", "on"]:
-        return "#43A047", txt.upper()
-    if t in ["nok", "falha", "erro", "fechado", "off"]:
-        return "#E53935", txt.upper()
-    return "#FB8C00", txt
-
-def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=False):
+def _render_tiles_from_cols(title, cols_orig, n_cols=4, interpret_numeric_as_status=False):
     cols_orig = [c for c in cols_orig if c]
     cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
     if not cols_orig:
@@ -249,8 +287,7 @@ def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=Fa
 
     for i, c in enumerate(cols_orig):
         raw = last_valid_raw(df, c)
-        val = to_float_ptbr(raw)
-        fill, txt = _tile_color_and_text(raw, val, c, force_neutral_numeric=force_neutral_numeric)
+        fill, txt = _tile_color_and_text(raw, c, interpret_numeric_as_status)
 
         r = i // n_cols
         cc = i % n_cols
@@ -259,12 +296,11 @@ def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=Fa
 
         fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
                       fillcolor=fill, line=dict(color="white", width=1))
-
         nome = _nome_exibicao(c)
-        fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2 + 0.15,
+        fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2 + 0.12,
                            text=f"<b style='font-size:18px'>{txt}</b>",
                            showarrow=False, font=dict(color="white"))
-        fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2 - 0.15,
+        fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2 - 0.18,
                            text=f"<span style='font-size:12px'>{nome}</span>",
                            showarrow=False, font=dict(color="white"))
 
@@ -272,64 +308,62 @@ def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=Fa
     st.subheader(title)
     st.plotly_chart(fig, use_container_width=True, key=f"plot-tiles-{_slug(title)}")
 
-def render_tiles_split(title_base, base_keywords, n_cols=4):
-    """Cards: Nitrificação e MBBR para Válvulas/Sopradores."""
+def render_tiles_split_status(title_base, base_keywords, n_cols=4):
+    """Cards para Nitrificação e MBBR com regra numérica=OK."""
     # Nitrificação
     cols_nitr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_NITR)
     cols_nitr = [c for c in cols_nitr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
-    _render_tiles_from_cols(f"{title_base} – Nitrificação", cols_nitr, n_cols=n_cols)
+    _render_tiles_from_cols(f"{title_base} – Nitrificação", cols_nitr, n_cols=n_cols, interpret_numeric_as_status=True)
 
     # MBBR
     cols_mbbr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_MBBR)
     cols_mbbr = [c for c in cols_mbbr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
-    _render_tiles_from_cols(f"{title_base} – MBBR", cols_mbbr, n_cols=n_cols)
+    _render_tiles_from_cols(f"{title_base} – MBBR", cols_mbbr, n_cols=n_cols, interpret_numeric_as_status=True)
 
 # -------------------------
-# Grupos adicionais ("puxar o que faltava")
+# Grupos adicionais (sem a regra numérica=OK)
 # -------------------------
 def render_outros_niveis():
-    # nível, mas não caçambas
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_NIVEIS_OUTROS)
     cols = [c for c in cols if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     if not cols:
         return
-    _render_tiles_from_cols("Níveis (MAB/TQ de Lodo)", cols, n_cols=3, force_neutral_numeric=False)
+    _render_tiles_from_cols("Níveis (MAB/TQ de Lodo)", cols, n_cols=3, interpret_numeric_as_status=False)
 
 def render_vazoes():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_VAZAO)
     if not cols:
         return
-    _render_tiles_from_cols("Vazões", cols, n_cols=3, force_neutral_numeric=True)
+    _render_tiles_from_cols("Vazões", cols, n_cols=3, interpret_numeric_as_status=False)
 
 def render_ph():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_PH)
     if not cols:
         return
-    _render_tiles_from_cols("pH", cols, n_cols=4, force_neutral_numeric=True)
+    _render_tiles_from_cols("pH", cols, n_cols=4, interpret_numeric_as_status=False)
 
 def render_sst():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_SST)
     if not cols:
         return
-    _render_tiles_from_cols("Sólidos (SS/SST)", cols, n_cols=4, force_neutral_numeric=True)
+    _render_tiles_from_cols("Sólidos (SS/SST)", cols, n_cols=4, interpret_numeric_as_status=False)
 
 def render_dqo():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_DQO)
     if not cols:
         return
-    _render_tiles_from_cols("DQO", cols, n_cols=4, force_neutral_numeric=True)
+    _render_tiles_from_cols("DQO", cols, n_cols=4, interpret_numeric_as_status=False)
 
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
     if not cols:
         return
-    _render_tiles_from_cols("Estados / Equipamentos", cols, n_cols=3, force_neutral_numeric=False)
+    _render_tiles_from_cols("Estados / Equipamentos", cols, n_cols=3, interpret_numeric_as_status=False)
 
 # =========================
 # CABEÇALHO (última medição)
 # =========================
 def header_info():
-    # tenta achar campos de auditoria
     cand = ["carimbo de data/hora", "data", "operador"]
     found = {}
     for c in df.columns:
@@ -346,7 +380,7 @@ def header_info():
     col2.metric("Registros", f"{len(df)} linhas")
 
 # =========================
-# DASHBOARD (como você quer)
+# DASHBOARD
 # =========================
 st.title("Dashboard Operacional ETE")
 header_info()
@@ -354,13 +388,13 @@ header_info()
 # Caçambas (gauge)
 render_cacambas_gauges("Caçambas")
 
-# Válvulas (cards) — Nitrificação e MBBR
-render_tiles_split("Válvulas", KW_VALVULA)
+# Válvulas (cards com regra numérica=OK) — Nitrificação e MBBR
+render_tiles_split_status("Válvulas", KW_VALVULA)
 
-# Sopradores (cards) — Nitrificação e MBBR
-render_tiles_split("Sopradores", KW_SOPRADOR)
+# Sopradores (cards com regra numérica=OK) — Nitrificação e MBBR
+render_tiles_split_status("Sopradores", KW_SOPRADOR)
 
-# Indicadores adicionais
+# Demais grupos (sem mudar a regra)
 render_outros_niveis()
 render_vazoes()
 render_ph()
@@ -369,23 +403,20 @@ render_dqo()
 render_estados()
 
 # =========================================================
-# RESUMO TEXTO DOS SOPRADORES (antes das cartas)
+# RESUMOS (texto) por status – SOPRADORES e VÁLVULAS
 # =========================================================
-BLOWER_O2_OK_THRESHOLD = 0.0  # altere para 0.2 se quiser OK somente > 0,2 mg/L
-
-def _num_from_text(name: str) -> int:
-    m = re.search(r'(\d+)', str(name))
-    return int(m.group(1)) if m else 9999
-
-def _status_from_raw(raw):
-    """Converte último valor em status padronizado (OK/NOK/OFF/—).
-       Numérico (oxigenação): > TH -> OK ; <= TH -> OFF."""
+def _status_from_raw_generic(raw, group_type: str):
+    # igual _status_from_raw_for_group, mas permite reutilizar para resumo
     if raw is None:
         return "—"
     s = str(raw).strip()
-    val = to_float_ptbr(s)
-    if not np.isnan(val):
-        return "OK" if val > BLOWER_O2_OK_THRESHOLD else "OFF"
+    v = to_float_ptbr(s)
+    if not np.isnan(v):
+        if group_type == "soprador":
+            return "OK" if v > BLOWER_O2_OK_THRESHOLD else "OFF"
+        if group_type == "valvula":
+            return "OK" if v > VALVE_NUMERIC_OK_THRESHOLD else "OFF"
+        return "—"
     t = _strip_accents(s.lower())
     if t in ["ok", "on", "ligado", "rodando", "aberto"]:
         return "OK"
@@ -395,27 +426,26 @@ def _status_from_raw(raw):
         return "OFF"
     return s.upper()
 
-def _collect_blowers_status(df_local: pd.DataFrame, grupo: str):
-    """grupo: 'mbbr' ou 'nitr'."""
+def _collect_status(df_local: pd.DataFrame, keywords: list, grupo: str, group_type: str):
     candidatos = []
     for c in df_local.columns:
         cn = _strip_accents(str(c).lower())
-        if (("soprador" in cn or "sopradores" in cn or "oxigenacao" in cn) and (grupo in cn)):
+        if any(k in cn for k in keywords) and (grupo in cn):
             candidatos.append(c)
     items, seen = [], set()
     for c in candidatos:
-        num = _num_from_text(c)
+        num = _extract_number_int(c)
         k = (grupo, num)
         if k in seen:
             continue
         seen.add(k)
         raw = last_valid_raw(df_local, c)
-        stt = _status_from_raw(raw)
+        stt = _status_from_raw_generic(raw, group_type)
         items.append((num, stt))
     items.sort(key=lambda x: x[0])
     return items
 
-def _classify_blowers(items):
+def _classify(items):
     ok, off, nok, outros = [], [], [], []
     for num, stt in items:
         s = str(stt).upper()
@@ -425,83 +455,87 @@ def _classify_blowers(items):
         else: outros.append(f"{num} ({stt})")
     return ok, off, nok, outros
 
-def _fmt_nums(nums):
+def _fmt(nums):
     return ", ".join(str(n) for n in sorted(nums)) if nums else "—"
 
-def render_blowers_summary():
-    st.markdown("### 🟢 Resumo dos sopradores (por status)")
-    colA, colB = st.columns(2)
+st.markdown("### 🟢 Resumo por status (antes das cartas)")
+colA, colB = st.columns(2)
 
-    # MBBR
-    mbbr_items = _collect_blowers_status(df, "mbbr")
-    ok_mbbr, off_mbbr, nok_mbbr, outros_mbbr = _classify_blowers(mbbr_items)
-    tot_mbbr = len(mbbr_items)
-    with colA:
-        st.markdown("**Sopradores MBBR**")
-        st.write(f"OK: {_fmt_nums(ok_mbbr)}")
-        if off_mbbr: st.write(f"OFF: {_fmt_nums(off_mbbr)}")
-        if nok_mbbr: st.write(f"NOK: {_fmt_nums(nok_mbbr)}")
-        if outros_mbbr: st.caption("Outros: " + ", ".join(outros_mbbr))
-        if tot_mbbr: st.caption(f"Rodando: {len(ok_mbbr)} de {tot_mbbr}")
+# Sopradores
+s_mbbr = _collect_status(df, KW_SOPRADOR, "mbbr", "soprador")
+s_nitr = _collect_status(df, KW_SOPRADOR, "nitr", "soprador")
+ok_m, off_m, nok_m, out_m = _classify(s_mbbr)
+ok_n, off_n, nok_n, out_n = _classify(s_nitr)
+with colA:
+    st.markdown("**Sopradores – MBBR**")
+    st.write(f"OK: {_fmt(ok_m)}")
+    if off_m: st.write(f"OFF: {_fmt(off_m)}")
+    if nok_m: st.write(f"NOK: {_fmt(nok_m)}")
+    if out_m: st.caption("Outros: " + ", ".join(out_m))
+    st.caption(f"Rodando: {len(ok_m)} de {len(s_mbbr)}")
+with colB:
+    st.markdown("**Sopradores – Nitrificação**")
+    st.write(f"OK: {_fmt(ok_n)}")
+    if off_n: st.write(f"OFF: {_fmt(off_n)}")
+    if nok_n: st.write(f"NOK: {_fmt(nok_n)}")
+    if out_n: st.caption("Outros: " + ", ".join(out_n))
+    st.caption(f"Rodando: {len(ok_n)} de {len(s_nitr)}")
 
-    # Nitrificação
-    nitr_items = _collect_blowers_status(df, "nitr")
-    ok_nitr, off_nitr, nok_nitr, outros_nitr = _classify_blowers(nitr_items)
-    tot_nitr = len(nitr_items)
-    with colB:
-        st.markdown("**Sopradores Nitrificação**")
-        st.write(f"OK: {_fmt_nums(ok_nitr)}")
-        if off_nitr: st.write(f"OFF: {_fmt_nums(off_nitr)}")
-        if nok_nitr: st.write(f"NOK: {_fmt_nums(nok_nitr)}")
-        if outros_nitr: st.caption("Outros: " + ", ".join(outros_nitr))
-        if tot_nitr: st.caption(f"Rodando: {len(ok_nitr)} de {tot_nitr}")
-
-# Mostrar o resumo ANTES das cartas
-render_blowers_summary()
+# Válvulas
+v_mbbr = _collect_status(df, KW_VALVULA, "mbbr", "valvula")
+v_nitr = _collect_status(df, KW_VALVULA, "nitr", "valvula")
+ok_vm, off_vm, nok_vm, out_vm = _classify(v_mbbr)
+ok_vn, off_vn, nok_vn, out_vn = _classify(v_nitr)
+colC, colD = st.columns(2)
+with colC:
+    st.markdown("**Válvulas – MBBR**")
+    st.write(f"OK: {_fmt(ok_vm)}")
+    if off_vm: st.write(f"OFF: {_fmt(off_vm)}")
+    if nok_vm: st.write(f"NOK: {_fmt(nok_vm)}")
+    if out_vm: st.caption("Outros: " + ", ".join(out_vm))
+    st.caption(f"Ativas: {len(ok_vm)} de {len(v_mbbr)}")
+with colD:
+    st.markdown("**Válvulas – Nitrificação**")
+    st.write(f"OK: {_fmt(ok_vn)}")
+    if off_vn: st.write(f"OFF: {_fmt(off_vn)}")
+    if nok_vn: st.write(f"NOK: {_fmt(nok_vn)}")
+    if out_vn: st.caption("Outros: " + ", ".join(out_vn))
+    st.caption(f"Ativas: {len(ok_vn)} de {len(v_nitr)}")
 
 # ============================================================
 # CARTAS DE CONTROLE – DIÁRIA, SEMANAL, MENSAL (Matplotlib)
 # ============================================================
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custo Diário (R$)")
-
-# Botão de recarregar
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
-# -------- LER ABA CONTROLE DE QUÍMICOS -------------
+# ---- Lê aba Controle de Químicos ----
 GID_QUIM = "668859455"
 URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
-
 dfq = pd.read_csv(URL_QUIM)
 dfq.columns = [str(c).strip() for c in dfq.columns]
 
-# Detectar a coluna de data
+# Detecta Data e parâmetro
 data_cols = [c for c in dfq.columns if "data" in c.lower()]
 if not data_cols:
     st.error("❌ Nenhuma coluna de Data encontrada.")
     st.stop()
 COL_DATA = data_cols[0]
-
-# Detectar o parâmetro — custo diário
 PARAM = "Custo Diario (R$)"
 if PARAM not in dfq.columns:
     st.error("❌ A coluna 'Custo Diario (R$)' não foi encontrada.")
     st.write("Colunas disponíveis:", dfq.columns.tolist())
     st.stop()
 
-# ---------- LIMPEZA BR ----------
-# Corrigir Data (DD/MM/AAAA)
+# Limpeza BR
 dfq[COL_DATA] = pd.to_datetime(dfq[COL_DATA], errors="coerce", dayfirst=True)
-
-# Corrigir número brasileiro para float
 dfq[PARAM] = (
-    dfq[PARAM]
-    .astype(str)
-    .str.replace("R$", "", regex=False)
-    .str.replace(" ", "", regex=False)
-    .str.replace(".", "", regex=False)     # remove milhar
-    .str.replace(",", ".", regex=False)    # vírgula -> ponto
+    dfq[PARAM].astype(str)
+      .str.replace("R$", "", regex=False)
+      .str.replace(" ", "", regex=False)
+      .str.replace(".", "", regex=False)
+      .str.replace(",", ".", regex=False)
 )
 dfq[PARAM] = pd.to_numeric(dfq[PARAM], errors="coerce")
 dfq = dfq.dropna(subset=[COL_DATA, PARAM]).sort_values(COL_DATA)
@@ -513,30 +547,21 @@ if dfq.empty:
     st.warning("Sem dados válidos para gerar as cartas.")
     st.stop()
 
-# ===========================================================
-#   AGREGAÇÕES — DIÁRIA, SEMANAL (ISO), MENSAL
-# ===========================================================
-
-# DIÁRIA (soma por dia — se tiver duplicidade no mesmo dia)
+# Agregações
 df_day = dfq.groupby(COL_DATA, as_index=False)[PARAM].sum().sort_values(COL_DATA)
 
-# SEMANAL (ISO – semanas iniciam na segunda)
 df_week = (
     dfq.assign(semana=dfq[COL_DATA].dt.to_period("W-MON"))
        .groupby("semana", as_index=False)[PARAM].sum()
 )
 df_week["Data"] = df_week["semana"].dt.start_time
 
-# MENSAL (primeiro dia do mês no eixo)
 df_month = (
     dfq.assign(mes=dfq[COL_DATA].dt.to_period("M"))
        .groupby("mes", as_index=False)[PARAM].sum()
 )
 df_month["Data"] = df_month["mes"].dt.to_timestamp()
 
-# ===========================================================
-#     FUNÇÃO PARA DESENHAR CARTA X-BARRA (SEM key)
-# ===========================================================
 def desenhar_carta(x, y, titulo, ylabel):
     y = pd.Series(y).astype(float)
     n = len(y)
@@ -562,21 +587,14 @@ def desenhar_carta(x, y, titulo, ylabel):
     ax.legend()
     st.pyplot(fig)
 
-# ===========================
-#           MÉTRICAS
-# ===========================
-# Custo do dia (último)
+# Métricas (dia, semana ISO, mês)
 ultimo = df_day[PARAM].iloc[-1]
-
-# Custo semanal (soma da semana ISO atual)
 iso_week = dfq[COL_DATA].dt.isocalendar()
 dfq["__sem__"] = iso_week.week.astype(int)
 dfq["__anoiso__"] = iso_week.year.astype(int)
 ult_sem = dfq["__sem__"].iloc[-1]
 ult_anoiso = dfq["__anoiso__"].iloc[-1]
 custo_semana = dfq[(dfq["__sem__"]==ult_sem) & (dfq["__anoiso__"]==ult_anoiso)][PARAM].sum()
-
-# Custo mensal (soma do mês atual)
 dfq["__mes__"] = dfq[COL_DATA].dt.month
 dfq["__ano__"] = dfq[COL_DATA].dt.year
 ult_mes = dfq["__mes__"].iloc[-1]
@@ -588,9 +606,6 @@ m1.metric("Custo do Dia", f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ","
 m2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 m3.metric("Custo do Mês", f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-# ===========================
-#         3 CARTAS
-# ===========================
 st.subheader("📅 Carta Diária")
 desenhar_carta(df_day[COL_DATA], df_day[PARAM], "Custo Diário (R$)", "Custo Diário (R$)")
 
