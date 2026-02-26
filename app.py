@@ -379,167 +379,160 @@ render_sst()
 render_dqo()
 render_estados()
 # ============================================================
-#            CARTAS DE CONTROLE (RODAPÉ) – Matplotlib
-#           Diária, Semanal (ISO), Mensal – Custo Diário (R$)
+#            CARTAS DE CONTROLE – DIÁRIA, SEMANAL, MENSAL
 # ============================================================
-st.markdown("---")
-st.header("🔴 Cartas de Controle – Custo (R$)")
 
-# Botão rápido para recarregar (útil no Streamlit Cloud)
-col_reload, _ = st.columns([1, 5])
-if col_reload.button("🔄 Recarregar cartas"):
+import matplotlib.pyplot as plt
+
+st.markdown("---")
+st.header("🔴 Cartas de Controle — Custo Diário (R$)")
+
+# Botão de recarregar
+if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
-# ---- CARREGA ABA 'Controle de Químicos' ----
+# -------- LER ABA CONTROLE DE QUÍMICOS -------------
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
-GID_QUIM = "668859455"  # gid da aba 'Controle de Químicos'
+GID_QUIM = "668859455"
 URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
 
-try:
-    df_quim = pd.read_csv(URL_QUIM)
-    df_quim.columns = [str(c).strip() for c in df_quim.columns]
-except Exception as e:
-    st.error(f"Não foi possível carregar a aba 'Controle de Químicos'. Erro: {e}")
+dfq = pd.read_csv(URL_QUIM)
+dfq.columns = [str(c).strip() for c in dfq.columns]
+
+# Detectar a coluna de data
+data_cols = [c for c in dfq.columns if "data" in c.lower()]
+if not data_cols:
+    st.error("❌ Nenhuma coluna de Data encontrada.")
     st.stop()
 
-# ---- DETECTA COLUNA DE DATA E PARAMETRO ----
-col_data_candidates = [c for c in df_quim.columns if "data" in c.lower()]
-if not col_data_candidates:
-    st.error("Nenhuma coluna de data encontrada na aba Controle de Químicos.")
-    st.write("Colunas lidas:", list(df_quim.columns))
-    st.stop()
-col_data = col_data_candidates[0]
+COL_DATA = data_cols[0]
 
-parametro = "Custo Diario (R$)"
-if parametro not in df_quim.columns:
-    st.error("A coluna 'Custo Diario (R$)' não existe na aba Controle de Químicos.")
-    st.write("Colunas lidas:", list(df_quim.columns))
+# Detectar o parâmetro — custo diário
+PARAM = "Custo Diario (R$)"
+if PARAM not in dfq.columns:
+    st.error("❌ A coluna 'Custo Diario (R$)' não foi encontrada.")
+    st.write("Colunas disponíveis:", dfq.columns.tolist())
     st.stop()
 
-# ---- LIMPEZA BR: Data e Numérico com vírgula/R$ ----
-df_quim[col_data] = pd.to_datetime(df_quim[col_data], errors="coerce", dayfirst=True)
+# ---------- LIMPEZA BR ----------
+# Corrigir Data (DD/MM/AAAA)
+dfq[COL_DATA] = pd.to_datetime(dfq[COL_DATA], errors="coerce", dayfirst=True)
 
-df_quim[parametro] = (
-    df_quim[parametro]
-      .astype(str)
-      .str.replace("R$", "", regex=False)
-      .str.replace(" ", "", regex=False)
-      .str.replace(".", "", regex=False)     # remove milhar 1.234
-      .str.replace(",", ".", regex=False)    # vírgula -> ponto
+# Corrigir número brasileiro para float
+dfq[PARAM] = (
+    dfq[PARAM]
+    .astype(str)
+    .str.replace("R$", "", regex=False)
+    .str.replace(" ", "", regex=False)
+    .str.replace(".", "", regex=False)     # remove milhar
+    .str.replace(",", ".", regex=False)    # vírgula -> ponto
 )
-df_quim[parametro] = pd.to_numeric(df_quim[parametro], errors="coerce")
 
-df_quim = df_quim.dropna(subset=[col_data, parametro]).sort_values(col_data)
+dfq[PARAM] = pd.to_numeric(dfq[PARAM], errors="coerce")
+dfq = dfq.dropna(subset=[COL_DATA, PARAM]).sort_values(COL_DATA)
 
-# ---- DEBUG opcional ----
-with st.expander("🔍 Ver dados lidos (debug)"):
-    st.write("Coluna de data detectada:", col_data)
-    st.dataframe(df_quim[[col_data, parametro]].tail(10))
+# DEBUG opcional
+with st.expander("🔍 Dados carregados (debug)"):
+    st.dataframe(dfq[[COL_DATA, PARAM]].tail())
 
-# ---- FUNÇÃO: desenha carta X-barra ----
-def _control_chart(x, y, titulo: str, ylabel: str, key: str):
+if dfq.empty:
+    st.warning("Sem dados válidos para gerar as cartas.")
+    st.stop()
+
+# ===========================================================
+#   AGREGAÇÕES — DIÁRIA, SEMANAL (ISO), MENSAL
+# ===========================================================
+
+# ----------- DIÁRIA (soma por dia) -----------
+df_day = dfq.groupby(COL_DATA, as_index=False)[PARAM].sum().sort_values(COL_DATA)
+
+# ----------- SEMANAL (ISO) -----------
+df_week = (
+    dfq.assign(semana=dfq[COL_DATA].dt.to_period("W-MON"))
+        .groupby("semana", as_index=False)[PARAM].sum()
+)
+df_week["Data"] = df_week["semana"].dt.start_time
+
+# ----------- MENSAL -----------
+df_month = (
+    dfq.assign(mes=dfq[COL_DATA].dt.to_period("M"))
+        .groupby("mes", as_index=False)[PARAM].sum()
+)
+df_month["Data"] = df_month["mes"].dt.to_timestamp()
+
+# ===========================================================
+#     FUNÇÃO PARA DESENHAR CARTA X-BARRA (SEM key)
+# ===========================================================
+
+def desenhar_carta(x, y, titulo, ylabel):
     y = pd.Series(y).astype(float)
     n = len(y)
-    if n == 0:
-        st.info(f"Sem dados para **{titulo}**.")
-        return
     media = y.mean()
     desvio = y.std(ddof=1) if n > 1 else 0.0
-    LSC = media + 3 * desvio
-    LIC = media - 3 * desvio
+    LSC = media + 3*desvio
+    LIC = media - 3*desvio
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(12,5))
 
-    ax.plot(x, y, marker="o", color="#1565C0", label=titulo)
-    ax.axhline(media, color="blue", linestyle="--", linewidth=2, label="Média")
+    ax.plot(x, y, marker="o", label=titulo, color="#1565C0")
+    ax.axhline(media, color="blue", linestyle="--", label="Média")
+
     if desvio > 0:
-        ax.axhline(LSC, color="#D32F2F", linestyle="--", linewidth=2, label="LSC (+3σ)")
-        ax.axhline(LIC, color="#D32F2F", linestyle="--", linewidth=2, label="LIC (−3σ)")
+        ax.axhline(LSC, color="red", linestyle="--", label="LSC (+3σ)")
+        ax.axhline(LIC, color="red", linestyle="--", label="LIC (−3σ)")
+
         acima = y > LSC
         abaixo = y < LIC
-        ax.scatter(pd.Series(x)[acima], y[acima], color="#D32F2F", s=60, marker="^", label="Acima do LSC")
-        ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="#D32F2F", s=60, marker="v", label="Abaixo do LIC")
 
-    ax.set_title(f"Carta de Controle – {titulo}")
-    ax.set_xlabel("Data")
+        ax.scatter(x[acima], y[acima], color="red", marker="^", s=70)
+        ax.scatter(x[abaixo], y[abaixo], color="red", marker="v", s=70)
+
+    ax.set_title(titulo)
     ax.set_ylabel(ylabel)
-    ax.grid(True, axis="y", alpha=0.25)
-    ax.legend(loc="best")
+    ax.set_xlabel("Data")
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend()
 
-    st.pyplot(fig, key=key)
+    st.pyplot(fig)
 
-# ============================================================
-#               AGREGAÇÕES: DIÁRIA, SEMANAL, MENSAL
-# ============================================================
+# ===========================================================
+#                       MÉTRICAS
+# ===========================================================
+# Custo do dia (último)
+ultimo = df_day[PARAM].iloc[-1]
 
-# 1) DIÁRIA – soma por dia (caso haja duplicidade no mesmo dia)
-df_day = (
-    df_quim
-      .groupby(col_data, as_index=False)[parametro].sum()
-      .sort_values(col_data)
-)
-# Métricas (dia/semana/mês) baseadas no diário
-if not df_day.empty:
-    # semana ISO e mês/ano
-    iso = df_day[col_data].dt.isocalendar()
-    df_day["__sem__"] = iso.week.astype(int)
-    df_day["__anoiso__"] = iso.year.astype(int)
-    df_day["__mes__"] = df_day[col_data].dt.month.astype(int)
-    df_day["__ano__"] = df_day[col_data].dt.year.astype(int)
+# Custo semanal (soma)
+iso_week = dfq[COL_DATA].dt.isocalendar()
+dfq["__sem__"] = iso_week.week.astype(int)
+dfq["__anoiso__"] = iso_week.year.astype(int)
 
-    ult_valor = df_day[parametro].iloc[-1]
-    ult_semana = df_day["__sem__"].iloc[-1]
-    ult_anoiso = df_day["__anoiso__"].iloc[-1]
-    ult_mes = df_day["__mes__"].iloc[-1]
-    ult_ano = df_day["__ano__"].iloc[-1]
+ult_sem = dfq["__sem__"].iloc[-1]
+ult_ano = dfq["__anoiso__"].iloc[-1]
 
-    custo_semana = df_day[(df_day["__sem__"]==ult_semana)&(df_day["__anoiso__"]==ult_anoiso)][parametro].sum()
-    custo_mes = df_day[(df_day["__mes__"]==ult_mes)&(df_day["__ano__"]==ult_ano)][parametro].sum()
-    media_dia = df_day[parametro].mean()
+custo_semana = dfq[(dfq["__sem__"]==ult_sem)&(dfq["__anoiso__"]==ult_ano)][PARAM].sum()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Custo do dia (últ.)", f"R$ {ult_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c2.metric("Custo da semana (soma)", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c3.metric("Custo do mês (soma)", f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c4.metric("Média diária", f"R$ {media_dia:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+# Custo mensal
+dfq["__mes__"] = dfq[COL_DATA].dt.month
+dfq["__ano__"] = dfq[COL_DATA].dt.year
+ult_mes = dfq["__mes__"].iloc[-1]
+ult_ano2 = dfq["__ano__"].iloc[-1]
 
-# 2) SEMANAL – soma por semana ISO (semanas começam na segunda)
-df_week = (
-    df_quim
-      .assign(Week=df_quim[col_data].dt.to_period("W-MON"))
-      .groupby("Week", as_index=False)[parametro].sum()
-)
-if not df_week.empty:
-    df_week["Data"] = df_week["Week"].dt.start_time  # data da segunda
-    df_week = df_week.sort_values("Data")
+custo_mes = dfq[(dfq["__mes__"]==ult_mes)&(dfq["__ano__"]==ult_ano2)][PARAM].sum()
 
-# 3) MENSAL – soma por mês calendário
-df_month = (
-    df_quim
-      .assign(Month=df_quim[col_data].dt.to_period("M"))
-      .groupby("Month", as_index=False)[parametro].sum()
-)
-if not df_month.empty:
-    df_month["Data"] = df_month["Month"].dt.to_timestamp()  # primeiro dia do mês
-    df_month = df_month.sort_values("Data")
+m1, m2, m3 = st.columns(3)
+m1.metric("Custo do Dia", f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+m2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+m3.metric("Custo do Mês", f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-# ============================================================
-#                    DESENHA AS 3 CARTAS
-# ============================================================
-st.subheader("📅 Diário")
-if df_day.empty:
-    st.info("Sem dados diários.")
-else:
-    _control_chart(df_day[col_data], df_day[parametro], "Custo Diário (R$)", "Custo Diário (R$)", key="carta-dia")
+# ===========================================================
+#                 DESENHAR 3 CARTAS
+# ===========================================================
 
-st.subheader("🗓️ Semanal (ISO – soma)")
-if df_week.empty:
-    st.info("Sem dados semanais.")
-else:
-    _control_chart(df_week["Data"], df_week[parametro], "Custo Semanal (R$)", "Custo Semanal (R$)", key="carta-semana")
+st.subheader("📅 Carta Diária")
+desenhar_carta(df_day[COL_DATA], df_day[PARAM], "Custo Diário (R$)", "Custo Diário (R$)")
 
-st.subheader("📆 Mensal (soma)")
-if df_month.empty:
-    st.info("Sem dados mensais.")
-else:
-    _control_chart(df_month["Data"], df_month[parametro], "Custo Mensal (R$)", "Custo Mensal (R$)", key="carta-mes")
+st.subheader("🗓️ Carta Semanal (ISO)")
+desenhar_carta(df_week["Data"], df_week[PARAM], "Custo Semanal (R$)", "Custo Semanal (R$)")
+
+st.subheader("📆 Carta Mensal")
+desenhar_carta(df_month["Data"], df_month[PARAM], "Custo Mensal (R$)", "Custo Mensal (R$)")
