@@ -268,4 +268,50 @@ render_cacambas_gauges("Caçambas")
 render_tiles_split("Válvulas", KW_VALVULA)
 
 # ---- Sopradores (cards) — dividido em Nitrificação e MBBR
-render_tiles_split("Sopradores", KW_SOPRADOR)
+render_tiles_split("Sopradores", KW_SOPRADOR)def _nome_exibicao(label_original: str) -> str:
+    """Padroniza nomes de Caçambas, Sopradores e Válvulas."""
+
+    base = _strip_accents(label_original.lower()).strip()
+
+    # -------------------------
+    # 1) CAÇAMBAS
+    # -------------------------
+    if "cacamba" in base:
+        # extrai número
+        num = ''.join(filter(str.isdigit, base))
+        if num:
+            return f"Nível da caçamba {num}"
+        return "Nível da caçamba"
+
+    # -------------------------
+    # 2) SOPRADORES (Nitrificação / MBBR)
+    # -------------------------
+    if any(k in base for k in ["soprador", "oxigenacao", "oxigenacao", "oxigenacao"]):
+
+        num = ''.join(filter(str.isdigit, base))
+        
+        if "nitr" in base:
+            return f"Soprador de nitrificação {num}" if num else "Soprador de nitrificação"
+
+        if "mbbr" in base:
+            return f"Soprador de MBBR {num}" if num else "Soprador de MBBR"
+
+        return f"Soprador {num}" if num else "Soprador"
+
+    # -------------------------
+    # 3) VÁLVULAS
+    # -------------------------
+    if "valvula" in base:
+
+        num = ''.join(filter(str.isdigit, base))
+
+        if "nitr" in base:
+            return f"Válvula de nitrificação {num}" if num else "Válvula de nitrificação"
+
+        if "mbbr" in base:
+            return f"Válvula de MBBR {num}" if num else "Válvula de MBBR"
+
+        return f"Válvula {num}" if num else "Válvula"
+
+    # fallback
+    return label_original
