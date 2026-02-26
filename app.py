@@ -52,7 +52,7 @@ KW_CACAMBA = ["cacamba", "caçamba"]
 KW_NITR = ["nitr", "nitrificacao", "nitrificação"]
 KW_MBBR = ["mbbr"]
 KW_VALVULA = ["valvula", "válvula"]
-KW_SOPRADOR = ["soprador", "oxigenacao", "oxigenação"] + KW_NITR + KW_MBBR
+KW_SOPRADOR = ["soprador", "oxigenacao", "oxigenação"]
 
 # Dicionário para renomear Caçambas (adicione variações que aparecerem na planilha)
 NOME_LIMPO = {
@@ -109,7 +109,7 @@ def _nome_exibicao(label_original: str) -> str:
     return NOME_LIMPO.get(base, label_original)
 
 # =========================
-# GAUGES (apenas Caçambas)
+# GAUGES (somente Caçambas)
 # =========================
 def make_speedometer(val, label):
     nome_exibicao = _nome_exibicao(label)
@@ -130,15 +130,16 @@ def make_speedometer(val, label):
         domain={"x": [0, 1], "y": [0, 1]},
     )
 
-def render_cacambas(title, filter_words, n_cols=4):
-    """Renderiza SOMENTE caçambas como velocímetro."""
-    cols_orig = _filter_columns_by_keywords(cols_lower_noacc, filter_words)
-    # Mantém apenas colunas que realmente parecem ser 'nível' de caçamba
+def render_cacambas_gauges(title, n_cols=4):
+    """Renderiza TODAS as caçambas como velocímetro (sem dividir por processo)."""
+    # Procura por colunas que contenham 'caçamba'
+    cols_orig = _filter_columns_by_keywords(cols_lower_noacc, KW_CACAMBA)
+    # Mantém apenas as que realmente são de nível (evita pegar válvulas/sopradores)
     cols_orig = [c for c in cols_orig if any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
 
     if not cols_orig:
-        st.info(f"Nenhuma caçamba encontrada para: {', '.join(filter_words)}")
+        st.info("Nenhuma caçamba encontrada.")
         return
 
     n_rows = int(np.ceil(len(cols_orig) / n_cols))
@@ -167,12 +168,10 @@ def render_cacambas(title, filter_words, n_cols=4):
 # =========================
 # TILES (Válvulas / Sopradores)
 # =========================
-def render_tiles(title, filter_words, n_cols=4):
-    cols_orig = _filter_columns_by_keywords(cols_lower_noacc, filter_words)
+def _render_tiles_from_cols(title, cols_orig, n_cols=4):
     cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
-
     if not cols_orig:
-        st.info(f"Nenhuma coluna encontrada para: {', '.join(filter_words)}")
+        st.info(f"Nenhum item encontrado para: {title}")
         return
 
     fig = go.Figure()
@@ -241,24 +240,32 @@ def render_tiles(title, filter_words, n_cols=4):
     st.subheader(title)
     st.plotly_chart(fig, use_container_width=True)
 
+def render_tiles_split(title_base, base_keywords, n_cols=4):
+    """
+    Renderiza duas seções de cards: Nitrificação e MBBR,
+    para os grupos especificados por base_keywords (ex.: válvulas ou sopradores).
+    """
+    # Nitrificação
+    cols_nitr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_NITR)
+    # Remove quaisquer colunas que sejam caçamba (só por garantia)
+    cols_nitr = [c for c in cols_nitr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
+    _render_tiles_from_cols(f"{title_base} – Nitrificação", cols_nitr, n_cols=n_cols)
+
+    # MBBR
+    cols_mbbr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_MBBR)
+    cols_mbbr = [c for c in cols_mbbr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
+    _render_tiles_from_cols(f"{title_base} – MBBR", cols_mbbr, n_cols=n_cols)
+
 # =========================
 # DASHBOARD
 # =========================
 st.title("Dashboard Operacional ETE")
 
-# ---- Caçambas (somente velocímetro), separadas por processo
-render_cacambas("Caçambas – Nitrificação", KW_CACAMBA + KW_NITR)
-render_cacambas("Caçambas – MBBR", KW_CACAMBA + KW_MBBR)
+# ---- Caçambas (somente velocímetro, todas juntas)
+render_cacambas_gauges("Caçambas")
 
-# ---- Válvulas (cards)
-render_tiles("Válvulas", KW_VALVULA)
+# ---- Válvulas (cards) — dividido em Nitrificação e MBBR
+render_tiles_split("Válvulas", KW_VALVULA)
 
-# ---- Sopradores (cards)
-render_tiles("Sopradores", KW_SOPRADOR)
-
-# =========================
-# DICA: personalize nomes
-# =========================
-# Para ajustar nomes exibidos (títulos), adicione a chave normalizada (sem acento/minúsculas)
-# no dicionário NOME_LIMPO acima. Exemplo:
-# NOME_LIMPO["nivel cacamba nitr 1"] = "Caçamba Nitr 1"
+# ---- Sopradores (cards) — dividido em Nitrificação e MBBR
+render_tiles_split("Sopradores", KW_SOPRADOR)
