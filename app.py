@@ -378,15 +378,20 @@ render_ph()
 render_sst()
 render_dqo()
 render_estados()
-
 # ============================================================
 #                 CARTA DE CONTROLE (RODAPÉ)
-#                 Usando Matplotlib – Custo Diário (R$)
+#           Matplotlib – Custo Diário (R$) com limpeza BR
 # ============================================================
 st.markdown("---")
 st.header("🔴 Carta de Controle – Custo Diário (R$)")
 
+# ✔ botão de recarregar (útil no Streamlit Cloud)
+col_reload, _ = st.columns([1, 5])
+if col_reload.button("🔄 Recarregar carta"):
+    st.rerun()
+
 # --- Lê a aba 'Controle de Químicos' (GID 668859455) ---
+SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
 GID_QUIM = "668859455"
 URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
 
@@ -397,25 +402,43 @@ except Exception as e:
     st.error(f"Não foi possível carregar a aba 'Controle de Químicos'. Erro: {e}")
     st.stop()
 
-# --- Descobre a coluna de data e ordena ---
+# --- Descobre a coluna de data (usa a primeira que contém 'data') ---
 col_data_candidates = [c for c in df_quim.columns if "data" in c.lower()]
 if not col_data_candidates:
     st.error("Nenhuma coluna de data encontrada na aba Controle de Químicos.")
     st.stop()
-
 col_data = col_data_candidates[0]
-df_quim[col_data] = pd.to_datetime(df_quim[col_data], errors="coerce")
-df_quim = df_quim.dropna(subset=[col_data]).sort_values(col_data)
 
 # --- Parâmetro padrão: Custo Diário (R$) ---
 parametro = "Custo Diario (R$)"
 if parametro not in df_quim.columns:
     st.error("A coluna 'Custo Diario (R$)' não existe na aba Controle de Químicos.")
+    st.write("Colunas encontradas:", list(df_quim.columns))
     st.stop()
 
-# Garante numérico e descarta inválidos
+# --- LIMPEZA ROBUSTA BR ---
+# 1) Data com dayfirst (24/02/2026)
+df_quim[col_data] = pd.to_datetime(df_quim[col_data], errors="coerce", dayfirst=True)
+
+# 2) Custo numérico: remove 'R$', espaço, ponto de milhar e troca vírgula por ponto
+df_quim[parametro] = (
+    df_quim[parametro]
+      .astype(str)
+      .str.replace("R$", "", regex=False)
+      .str.replace(" ", "", regex=False)
+      .str.replace(".", "", regex=False)     # remove milhar tipo 1.234
+      .str.replace(",", ".", regex=False)    # vírgula -> ponto
+)
 df_quim[parametro] = pd.to_numeric(df_quim[parametro], errors="coerce")
-df_quim = df_quim.dropna(subset=[parametro])
+
+# Remove linhas inválidas e ordena
+df_quim = df_quim.dropna(subset=[col_data, parametro]).sort_values(col_data)
+
+# --- DEBUG opcional: visualize o que chegou depois da limpeza ---
+with st.expander("🔍 Ver dados lidos (debug)"):
+    st.write("Coluna de data detectada:", col_data)
+    st.write("Últimas linhas (data + custo):")
+    st.dataframe(df_quim[[col_data, parametro]].tail(10))
 
 if df_quim.empty:
     st.info("Sem dados válidos para o Custo Diário (R$).")
@@ -431,7 +454,6 @@ else:
     LIC = media - 3 * desvio
 
     # ---------------- Indicadores resumidos ----------------
-    # Semana ISO e mês numérico/ano para somatórios corretos
     iso = df_quim[col_data].dt.isocalendar()
     df_quim["__semana__"] = iso.week.astype(int)
     df_quim["__anoiso__"] = iso.year.astype(int)
@@ -461,17 +483,12 @@ else:
     # ---------------- Gráfico – Matplotlib ----------------
     fig, ax = plt.subplots(figsize=(12, 5))
 
-    # Curva de valores
     ax.plot(x, y, marker="o", color="#1565C0", label="Custo Diário")
-
-    # Linhas de referência
     ax.axhline(media, color="blue", linestyle="--", linewidth=2, label="Média")
+
     if desvio > 0:
         ax.axhline(LSC, color="#D32F2F", linestyle="--", linewidth=2, label="LSC (+3σ)")
         ax.axhline(LIC, color="#D32F2F", linestyle="--", linewidth=2, label="LIC (−3σ)")
-
-    # Destaque pontos fora de controle
-    if desvio > 0:
         acima = y > LSC
         abaixo = y < LIC
         ax.scatter(x[acima], y[acima], color="#D32F2F", s=60, marker="^", label="Acima do LSC")
@@ -482,5 +499,7 @@ else:
     ax.set_ylabel("Custo Diário (R$)")
     ax.grid(True, axis="y", alpha=0.25)
     ax.legend(loc="best")
+
+    st.pyplot(fig)
 
     st.pyplot(fig)
