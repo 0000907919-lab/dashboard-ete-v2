@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 # -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
@@ -378,3 +379,102 @@ render_ph()
 render_sst()
 render_dqo()
 render_estados()
+# ============================================================
+#            TABS → DASHBOARD  |  CARTA DE CONTROLE
+# ============================================================
+
+tab1, tab2 = st.tabs(["🔵 Dashboard Operacional", "🔴 Carta de Controle"])
+
+# ------------------
+# TAB 1 — DASHBOARD
+# ------------------
+with tab1:
+    st.title("Dashboard Operacional ETE")
+    header_info()
+
+    render_cacambas_gauges("Caçambas")
+    render_tiles_split("Válvulas", KW_VALVULA)
+    render_tiles_split("Sopradores", KW_SOPRADOR)
+
+    render_outros_niveis()
+    render_vazoes()
+    render_ph()
+    render_sst()
+    render_dqo()
+    render_estados()
+
+# ============================================================
+# TAB 2 — CARTA DE CONTROLE (CUSTO DIÁRIO)
+# ============================================================
+with tab2:
+
+    st.title("Carta de Controle – Custo Diário (R$)")
+
+    # Carrega a aba Controle de Químicos
+    SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
+    GID_QUIM = "668859455"
+    URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
+
+    df_quim = pd.read_csv(URL_QUIM)
+    df_quim.columns = [str(c).strip() for c in df_quim.columns]
+
+    # Identifica automaticamente a coluna de Data
+    col_data = [c for c in df_quim.columns if "data" in c.lower()]
+    if col_data:
+        col_data = col_data[0]
+        df_quim[col_data] = pd.to_datetime(df_quim[col_data], errors="coerce")
+        df_quim = df_quim.dropna(subset=[col_data])
+        df_quim = df_quim.sort_values(col_data)
+    else:
+        st.error("Nenhuma coluna de data encontrada na aba Controle de Químicos.")
+        st.stop()
+
+    # Parâmetro padrão: Custo Diário
+    parametro = "Custo Diario (R$)"
+
+    if parametro not in df_quim.columns:
+        st.error("A coluna 'Custo Diario (R$)' não foi encontrada.")
+        st.stop()
+
+    valores = df_quim[parametro].astype(float)
+
+    media = valores.mean()
+    desvio = valores.std()
+    LSC = media + 3 * desvio
+    LIC = media - 3 * desvio
+
+    # ------------- Gráfico -----------------
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.plot(df_quim[col_data], valores, marker="o", label="Valores", color="#1565C0")
+    ax.axhline(media, color="blue", linestyle="--", label="Média")
+    ax.axhline(LSC, color="red", linestyle="--", label="LSC (Limite Superior)")
+    ax.axhline(LIC, color="red", linestyle="--", label="LIC (Limite Inferior)")
+
+    ax.set_title("Carta de Controle – Custo Diário (R$)")
+    ax.set_xlabel("Data")
+    ax.set_ylabel("Custo Diário (R$)")
+    ax.legend()
+
+    st.pyplot(fig)
+
+    # ---------------- Indicadores ----------------
+    st.subheader("Resumo")
+    colA, colB, colC = st.columns(3)
+
+    colA.metric("Custo do dia", f"R$ {valores.iloc[-1]:.2f}")
+    colB.metric("Média", f"R$ {media:.2f}")
+    colC.metric("Desvio padrão", f"R$ {desvio:.2f}")
+
+    # ------------- Custo semanal e mensal -------------
+    df_quim["Semana"] = df_quim[col_data].dt.isocalendar().week
+    df_quim["Mes"] = df_quim[col_data].dt.month
+
+    semana_atual = df_quim["Semana"].iloc[-1]
+    mes_atual = df_quim["Mes"].iloc[-1]
+
+    custo_semana = df_quim[df_quim["Semana"] == semana_atual][parametro].sum()
+    custo_mes = df_quim[df_quim["Mes"] == mes_atual][parametro].sum()
+
+    st.metric("Custo total da Semana", f"R$ {custo_semana:.2f}")
+    st.metric("Custo total do Mês", f"R$ {custo_mes:.2f}")
