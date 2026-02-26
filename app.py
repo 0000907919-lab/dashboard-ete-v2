@@ -21,11 +21,11 @@ CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&
 # Carrega a planilha
 # -------------------------
 df = pd.read_csv(CSV_URL)
-
-# Remove espaços e normaliza nomes de colunas
 df.columns = [str(c).strip() for c in df.columns]
 
-# Função para remover acentos
+# =========================
+# NORMALIZAÇÃO / AUXILIARES
+# =========================
 def _strip_accents(s: str) -> str:
     import unicodedata
     return "".join(
@@ -33,46 +33,19 @@ def _strip_accents(s: str) -> str:
         if unicodedata.category(c) != "Mn"
     )
 
-# Tabela auxiliar com nomes normalizados (p/ filtros)
 cols_lower_noacc = [_strip_accents(c.lower()) for c in df.columns]
 COLMAP = dict(zip(cols_lower_noacc, df.columns))  # normalizado -> original
 
-# (Opcional) detectar coluna de tempo
-TIME_CANDIDATES = ["carimbo de data/hora", "timestamp", "data", "hora", "date", "datetime"]
-TIME_COL = None
-for c in df.columns:
-    if _strip_accents(c.lower()) in [_strip_accents(x) for x in TIME_CANDIDATES]:
-        TIME_COL = c
-        break
-
-# =========================
-# PALAVRAS-CHAVE E NOMES
-# =========================
+# Palavras‑chave
 KW_CACAMBA = ["cacamba", "caçamba"]
 KW_NITR = ["nitr", "nitrificacao", "nitrificação"]
 KW_MBBR = ["mbbr"]
 KW_VALVULA = ["valvula", "válvula"]
 KW_SOPRADOR = ["soprador", "oxigenacao", "oxigenação"]
 
-# Dicionário para renomear Caçambas (adicione variações que aparecerem na planilha)
-NOME_LIMPO = {
-    "nivel da cacamba 1": "Caçamba 1",
-    "nivel da cacamba 2": "Caçamba 2",
-    "nivel da cacamba 3": "Caçamba 3",
-    "nivel cacamba 1": "Caçamba 1",
-    "nivel cacamba 2": "Caçamba 2",
-    "nivel cacamba 3": "Caçamba 3",
-    "nivel de cacamba 1": "Caçamba 1",
-    "nivel de cacamba 2": "Caçamba 2",
-    "nivel de cacamba 3": "Caçamba 3",
-    # Exemplos (descomente/edite se tiver na sua planilha):
-    # "nivel cacamba nitr 1": "Caçamba Nitr 1",
-    # "nivel cacamba mbbr 1": "Caçamba MBBR 1",
-}
-
-# =========================
-# FUNÇÕES AUXILIARES
-# =========================
+# -------------------------
+# Conversões e utilidades
+# -------------------------
 def to_float_ptbr(x):
     """Converte string PT-BR (%, vírgula) para float."""
     if pd.isna(x):
@@ -104,9 +77,46 @@ def _filter_columns_by_keywords(all_cols_norm_noacc, keywords):
             selected_norm.append(c_norm)
     return [COLMAP[c] for c in selected_norm]
 
+# =========================
+# PADRONIZAÇÃO DE NOMES (TÍTULOS)
+# =========================
+def _extract_number(base: str) -> str:
+    num = "".join(ch for ch in base if ch.isdigit())
+    return num
+
 def _nome_exibicao(label_original: str) -> str:
-    base = _strip_accents(label_original.lower())
-    return NOME_LIMPO.get(base, label_original)
+    """
+    Padroniza nomes para:
+      - "Nível da caçamba X"
+      - "Soprador de nitrificação X" / "Soprador de MBBR X"
+      - "Válvula de nitrificação X" / "Válvula de MBBR X"
+    Sem colchetes e sem repetições.
+    """
+    base = _strip_accents(label_original.lower()).strip()
+    num = _extract_number(base)
+
+    # Caçambas
+    if "cacamba" in base:
+        return f"Nível da caçamba {num}" if num else "Nível da caçamba"
+
+    # Sopradores (inclui "oxigenação")
+    if ("soprador" in base) or ("oxigenacao" in base):
+        if any(k in base for k in KW_NITR):
+            return f"Soprador de nitrificação {num}" if num else "Soprador de nitrificação"
+        if any(k in base for k in KW_MBBR):
+            return f"Soprador de MBBR {num}" if num else "Soprador de MBBR"
+        return f"Soprador {num}" if num else "Soprador"
+
+    # Válvulas
+    if "valvula" in base:
+        if any(k in base for k in KW_NITR):
+            return f"Válvula de nitrificação {num}" if num else "Válvula de nitrificação"
+        if any(k in base for k in KW_MBBR):
+            return f"Válvula de MBBR {num}" if num else "Válvula de MBBR"
+        return f"Válvula {num}" if num else "Válvula"
+
+    # Fallback
+    return label_original
 
 # =========================
 # GAUGES (somente Caçambas)
@@ -132,9 +142,7 @@ def make_speedometer(val, label):
 
 def render_cacambas_gauges(title, n_cols=4):
     """Renderiza TODAS as caçambas como velocímetro (sem dividir por processo)."""
-    # Procura por colunas que contenham 'caçamba'
     cols_orig = _filter_columns_by_keywords(cols_lower_noacc, KW_CACAMBA)
-    # Mantém apenas as que realmente são de nível (evita pegar válvulas/sopradores)
     cols_orig = [c for c in cols_orig if any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
 
@@ -169,7 +177,9 @@ def render_cacambas_gauges(title, n_cols=4):
 # TILES (Válvulas / Sopradores)
 # =========================
 def _render_tiles_from_cols(title, cols_orig, n_cols=4):
+    cols_orig = [c for c in cols_orig if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
+
     if not cols_orig:
         st.info(f"Nenhum item encontrado para: {title}")
         return
@@ -241,19 +251,13 @@ def _render_tiles_from_cols(title, cols_orig, n_cols=4):
     st.plotly_chart(fig, use_container_width=True)
 
 def render_tiles_split(title_base, base_keywords, n_cols=4):
-    """
-    Renderiza duas seções de cards: Nitrificação e MBBR,
-    para os grupos especificados por base_keywords (ex.: válvulas ou sopradores).
-    """
+    """Renderiza duas seções de cards: Nitrificação e MBBR para o grupo especificado."""
     # Nitrificação
     cols_nitr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_NITR)
-    # Remove quaisquer colunas que sejam caçamba (só por garantia)
-    cols_nitr = [c for c in cols_nitr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     _render_tiles_from_cols(f"{title_base} – Nitrificação", cols_nitr, n_cols=n_cols)
 
     # MBBR
     cols_mbbr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_MBBR)
-    cols_mbbr = [c for c in cols_mbbr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     _render_tiles_from_cols(f"{title_base} – MBBR", cols_mbbr, n_cols=n_cols)
 
 # =========================
@@ -261,57 +265,11 @@ def render_tiles_split(title_base, base_keywords, n_cols=4):
 # =========================
 st.title("Dashboard Operacional ETE")
 
-# ---- Caçambas (somente velocímetro, todas juntas)
+# Caçambas (gauge)
 render_cacambas_gauges("Caçambas")
 
-# ---- Válvulas (cards) — dividido em Nitrificação e MBBR
+# Válvulas (cards) — Nitrificação e MBBR
 render_tiles_split("Válvulas", KW_VALVULA)
 
-# ---- Sopradores (cards) — dividido em Nitrificação e MBBR
-render_tiles_split("Sopradores", KW_SOPRADOR)def _nome_exibicao(label_original: str) -> str:
-    """Padroniza nomes de Caçambas, Sopradores e Válvulas."""
-
-    base = _strip_accents(label_original.lower()).strip()
-
-    # -------------------------
-    # 1) CAÇAMBAS
-    # -------------------------
-    if "cacamba" in base:
-        # extrai número
-        num = ''.join(filter(str.isdigit, base))
-        if num:
-            return f"Nível da caçamba {num}"
-        return "Nível da caçamba"
-
-    # -------------------------
-    # 2) SOPRADORES (Nitrificação / MBBR)
-    # -------------------------
-    if any(k in base for k in ["soprador", "oxigenacao", "oxigenacao", "oxigenacao"]):
-
-        num = ''.join(filter(str.isdigit, base))
-        
-        if "nitr" in base:
-            return f"Soprador de nitrificação {num}" if num else "Soprador de nitrificação"
-
-        if "mbbr" in base:
-            return f"Soprador de MBBR {num}" if num else "Soprador de MBBR"
-
-        return f"Soprador {num}" if num else "Soprador"
-
-    # -------------------------
-    # 3) VÁLVULAS
-    # -------------------------
-    if "valvula" in base:
-
-        num = ''.join(filter(str.isdigit, base))
-
-        if "nitr" in base:
-            return f"Válvula de nitrificação {num}" if num else "Válvula de nitrificação"
-
-        if "mbbr" in base:
-            return f"Válvula de MBBR {num}" if num else "Válvula de MBBR"
-
-        return f"Válvula {num}" if num else "Válvula"
-
-    # fallback
-    return label_original
+# Sopradores (cards) — Nitrificação e MBBR
+render_tiles_split("Sopradores", KW_SOPRADOR)
