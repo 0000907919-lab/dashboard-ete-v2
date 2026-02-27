@@ -380,7 +380,7 @@ render_dqo()
 render_estados()
 # ============================================================
 #                 CARTA DE CONTROLE (RODAPÉ)
-#                   Custo Diário (R$)
+#                 Usando Matplotlib – Custo Diário (R$)
 # ============================================================
 
 st.markdown("---")
@@ -388,7 +388,7 @@ st.header("🔴 Carta de Controle – Custo Diário (R$)")
 
 # --- Lê a aba 'Controle de Químicos' da MESMA planilha ---
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
-GID_QUIM = "668859455"
+GID_QUIM = "668859455"  # gid da aba 'Controle de Químicos'
 URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
 
 try:
@@ -414,29 +414,32 @@ if parametro not in df_quim.columns:
     st.error("A coluna 'Custo Diario (R$)' não existe na aba Controle de Químicos.")
     st.stop()
 
-# Garante tipo numérico
+# Garante numérico e descarta inválidos
 df_quim[parametro] = pd.to_numeric(df_quim[parametro], errors="coerce")
 df_quim = df_quim.dropna(subset=[parametro])
 
 if df_quim.empty:
     st.info("Sem dados válidos para o Custo Diário (R$).")
 else:
-    valores = df_quim[parametro]
+    # Série para a carta
+    x = df_quim[col_data]
+    y = df_quim[parametro].astype(float)
 
-    media = valores.mean()
-    desvio = valores.std(ddof=1) if len(valores) > 1 else 0.0
+    # Estatística da carta (X-barra simples)
+    media = y.mean()
+    desvio = y.std(ddof=1) if len(y) > 1 else 0.0
     LSC = media + 3 * desvio
     LIC = media - 3 * desvio
 
-    # ---- Indicadores: dia / semana / mês ----
-    # Semana ISO e mês numérico
+    # ---------------- Indicadores resumidos ----------------
+    # Semana ISO e mês numérico/ano para somatórios corretos
     iso = df_quim[col_data].dt.isocalendar()
     df_quim["__semana__"] = iso.week.astype(int)
     df_quim["__anoiso__"] = iso.year.astype(int)
     df_quim["__mes__"] = df_quim[col_data].dt.month.astype(int)
     df_quim["__ano__"] = df_quim[col_data].dt.year.astype(int)
 
-    ult_dia_valor = valores.iloc[-1]
+    ult_valor = y.iloc[-1]
     ult_semana = df_quim["__semana__"].iloc[-1]
     ult_anoiso = df_quim["__anoiso__"].iloc[-1]
     ult_mes = df_quim["__mes__"].iloc[-1]
@@ -451,50 +454,34 @@ else:
     ][parametro].sum()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Custo do dia", f"R$ {ult_dia_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c1.metric("Custo do dia", f"R$ {ult_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     c2.metric("Custo da semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     c3.metric("Custo do mês", f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c4.metric("Média (cartas)", f"R$ {media:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c4.metric("Média (carta)", f"R$ {media:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-    # ---- Carta de controle com Plotly (sem matplotlib) ----
-    # Linha dos valores + linhas horizontais de Média / LSC / LIC
-    fig = go.Figure()
+    # ---------------- Gráfico – Matplotlib ----------------
+    fig, ax = plt.subplots(figsize=(12, 5))
 
-    # Sinaliza pontos fora de controle
-    out_upper = df_quim[valores > LSC]
-    out_lower = df_quim[valores < LIC]
-
-    fig.add_trace(go.Scatter(
-        x=df_quim[col_data], y=valores,
-        mode="lines+markers", name="Custo Diário",
-        line=dict(color="#1565C0"), marker=dict(size=7)
-    ))
-
-    if not out_upper.empty:
-        fig.add_trace(go.Scatter(
-            x=out_upper[col_data], y=out_upper[parametro],
-            mode="markers", name="Acima do LSC",
-            marker=dict(color="#D32F2F", size=10, symbol="triangle-up")
-        ))
-    if not out_lower.empty:
-        fig.add_trace(go.Scatter(
-            x=out_lower[col_data], y=out_lower[parametro],
-            mode="markers", name="Abaixo do LIC",
-            marker=dict(color="#D32F2F", size=10, symbol="triangle-down")
-        ))
+    # Curva de valores
+    ax.plot(x, y, marker="o", color="#1565C0", label="Custo Diário")
 
     # Linhas de referência
-    fig.add_hline(y=media, line_dash="dash", line_color="blue", annotation_text="Média", annotation_position="top left")
+    ax.axhline(media, color="blue", linestyle="--", linewidth=2, label="Média")
     if desvio > 0:
-        fig.add_hline(y=LSC, line_dash="dash", line_color="red", annotation_text="LSC", annotation_position="top left")
-        fig.add_hline(y=LIC, line_dash="dash", line_color="red", annotation_text="LIC", annotation_position="bottom left")
+        ax.axhline(LSC, color="#D32F2F", linestyle="--", linewidth=2, label="LSC (+3σ)")
+        ax.axhline(LIC, color="#D32F2F", linestyle="--", linewidth=2, label="LIC (−3σ)")
 
-    fig.update_layout(
-        height=420,
-        margin=dict(l=10, r=10, t=30, b=10),
-        yaxis_title="Custo Diário (R$)",
-        xaxis_title="Data",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-    )
+    # Destaque pontos fora de controle
+    if desvio > 0:
+        acima = y > LSC
+        abaixo = y < LIC
+        ax.scatter(x[acima], y[acima], color="#D32F2F", s=60, marker="^", label="Acima do LSC")
+        ax.scatter(x[abaixo], y[abaixo], color="#D32F2F", s=60, marker="v", label="Abaixo do LIC")
 
-    st.plotly_chart(fig, use_container_width=True)
+    ax.set_title("Carta de Controle – Custo Diário (R$)")
+    ax.set_xlabel("Data")
+    ax.set_ylabel("Custo Diário (R$)")
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend(loc="best")
+
+    st.pyplot(fig)
