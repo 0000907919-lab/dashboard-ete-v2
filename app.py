@@ -355,6 +355,8 @@ def render_dqo():
     _render_tiles_from_cols("DQO", cols, n_cols=4, interpret_numeric_as_status=False)
 
 def render_estados():
+    if not dfs_quim:
+    st.error("Nenhum químico detectado.")
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
