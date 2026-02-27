@@ -375,6 +375,181 @@ render_tiles_split("Sopradores", KW_SOPRADOR)
 render_outros_niveis()
 render_vazoes()
 render_ph()
+# =========================================================
+# 📊 CARTAS DE CONTROLE – MULTI QUÍMICOS (VERSÃO FINAL)
+# =========================================================
+
+st.markdown("---")
+st.header("🔴 Cartas de Controle — Custos dos Químicos")
+
+# URL da aba Seleção Químicos
+GID_QUIM = "668859455"
+URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
+
+# 1) Lê a aba completa (a primeira linha é a faixa azul com os nomes)
+dfraw = pd.read_csv(URL_QUIM, header=None, dtype=str)
+
+# Faixa azul com nomes dos produtos
+linha_nomes = dfraw.iloc[0].tolist()
+
+# Segunda linha contém os rótulos reais (DATA, CONSUMO, META, CUSTO $$ etc.)
+_raw_header = dfraw.iloc[1].tolist()
+
+# Normaliza rótulos (troca vazios por "COLUNA_VAZIA")
+header_row = []
+for h in _raw_header:
+    if h is None or (isinstance(h, float) and pd.isna(h)):
+        header_row.append("COLUNA_VAZIA")
+    else:
+        s = str(h).strip()
+        header_row.append(s if s != "" else "COLUNA_VAZIA")
+
+# Gera cabeçalhos únicos (evita erro de duplicados no Streamlit/Arrow)
+def _make_unique(names):
+    seen = {}
+    out = []
+    for n in names:
+        seen[n] = seen.get(n, 0) + 1
+        out.append(n if seen[n] == 1 else f"{n}__{seen[n]}")
+    return out
+
+header_unique = _make_unique(header_row)
+
+# Dados começam na terceira linha em diante
+dfq = dfraw.iloc[2:].copy()
+dfq.columns = header_unique
+
+# Remove colunas duplicadas definitivamente
+dfq = dfq.loc[:, ~pd.Index(dfq.columns).duplicated()].reset_index(drop=True)
+
+# Identifica colunas DATA e CUSTO $$ (ignora "Custo $$ azul")
+colunas = [c.strip() for c in dfq.columns]
+indices_data  = [i for i, c in enumerate(colunas) if c.upper() == "DATA"]
+indices_custo = [i for i, c in enumerate(colunas) if c.upper() == "CUSTO $$"]
+
+# Função para identificar corretamente o nome do químico
+def _nome_quimico(idx_data_col):
+    # tenta a mesma coluna
+    try:
+        nm = (linha_nomes[idx_data_col] or "").strip()
+        if nm:
+            return nm
+    except:
+        pass
+
+    # varre para a esquerda (caso seja célula mesclada)
+    j = idx_data_col - 1
+    while j >= 0:
+        val = (linha_nomes[j] or "").strip()
+        if val:
+            return val
+        j -= 1
+
+    return f"Químico col {idx_data_col}"
+
+# Prepara dados por químico
+dfs_quim = []
+
+def preparar_dados_quimico(df, idx_data, idx_custo, nome):
+    bloco = df[[df.columns[idx_data], df.columns[idx_custo]]].copy()
+    bloco.columns = ["DATA", "CUSTO"]
+
+    bloco["DATA"] = pd.to_datetime(bloco["DATA"], dayfirst=True, errors="coerce")
+
+    bloco["CUSTO"] = (
+        bloco["CUSTO"]
+        .astype(str)
+        .str.replace("R$", "")
+        .str.replace(" ", "")
+        .str.replace(".", "")
+        .str.replace(",", ".", regex=False)
+    )
+    bloco["CUSTO"] = pd.to_numeric(bloco["CUSTO"], errors="coerce")
+
+    bloco = bloco.dropna(subset=["DATA", "CUSTO"]).sort_values("DATA")
+    bloco["Quimico"] = nome
+    return bloco
+
+# Monta cada bloco DATA → CUSTO
+for idx_data in indices_data:
+    candidatos = [i for i in indices_custo if i > idx_data]
+    if not candidatos:
+        continue
+
+    idx_custo = candidatos[0]
+    nome = _nome_quimico(idx_data)
+
+    dfs_quim.append(preparar_dados_quimico(dfq, idx_data, idx_custo, nome))
+
+# Se nada foi detectado
+if not dfs_quim:
+    st.error("Nenhum químico detectado na aba Seleção Químicos.")
+    st.stop()
+
+# Consolida
+df_final = pd.concat(dfs_quim, ignore_index=True)
+
+# Função universal das cartas
+def desenhar_carta(x, y, titulo, ylabel):
+    y = pd.Series(y).astype(float)
+    media = y.mean()
+    desvio = y.std(ddof=1) if len(y) > 1 else 0
+    LSC = media + 3*desvio
+    LIC = media - 3*desvio
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(x, y, marker="o", color="#1565C0")
+    ax.axhline(media, color="blue", linestyle="--", label="Média")
+
+    if desvio > 0:
+        ax.axhline(LSC, color="red", linestyle="--", label="LSC +3σ")
+        ax.axhline(LIC, color="red", linestyle="--", label="LIC -3σ")
+
+        xs = pd.Series(x)
+        ax.scatter(xs[y > LSC], y[y > LSC], color="red", marker="^", s=70)
+        ax.scatter(xs[y < LIC], y[y < LIC], color="red", marker="v", s=70)
+
+    ax.set_title(titulo)
+    ax.set_xlabel("Data")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend()
+
+    st.pyplot(fig)
+
+# =========================================================
+# GERA AS CARTAS PARA CADA QUÍMICO
+# =========================================================
+
+for quim in df_final["Quimico"].unique():
+    bloco = df_final[df_final["Quimico"] == quim]
+
+    st.subheader(f"📌 {quim}")
+
+    # Diário
+    st.markdown("### 📅 Diário")
+    desenhar_carta(bloco["DATA"], bloco["CUSTO"], f"Custo Diário — {quim}", "Custo (R$)")
+
+    # Semanal
+    df_week = (
+        bloco.assign(semana=bloco["DATA"].dt.to_period("W-MON"))
+             .groupby("semana", as_index=False)["CUSTO"].sum()
+    )
+    df_week["Data"] = df_week["semana"].dt.start_time
+
+    st.markdown("### 🗓️ Semanal (ISO)")
+    desenhar_carta(df_week["Data"], df_week["CUSTO"], f"Custo Semanal — {quim}", "Custo (R$)")
+
+    # Mensal
+    df_month = (
+        bloco.assign(mes=bloco["DATA"].dt.to_period("M"))
+             .groupby("mes", as_index=False)["CUSTO"].sum()
+    )
+    df_month["Data"] = df_month["mes"].dt.to_timestamp()
+
+    st.markdown("### 📆 Mensal")
+    desenhar_carta(df_month["Data"], df_month["CUSTO"], f"Custo Mensal — {quim}", "Custo (R$)")
+``
 render_sst()
 render_dqo()
 render_estados()
