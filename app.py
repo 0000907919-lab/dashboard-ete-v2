@@ -370,7 +370,7 @@ render_sst()
 render_dqo()
 render_estados()
 # ============================================================
-#        CARTAS DE CONTROLE — CUSTO (R$)  [ROBUSTO MULTI-BLOCO]
+#        CARTAS DE CONTROLE — CUSTO (R$)  [UMA POR ITEM]
 # ============================================================
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custo (R$)")
@@ -381,7 +381,7 @@ with st.sidebar:
 GID_GASTOS = gid_input.strip() or "668859455"
 URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
 
-# Botão de recarregar (útil no Cloud)
+# Botão de recarregar
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
@@ -403,13 +403,14 @@ def _find_header_row(df_txt: pd.DataFrame, max_scan: int = 80) -> int | None:
     """
     Encontra a linha do cabeçalho: deve conter 'data' E algum de
     {'custo','custos','gasto','gastos','valor','$'}.
+    (corrigido o NameError: usamos 'kw' e 'v' corretamente)
     """
     kws_custo = ["custo", "custos", "gasto", "gastos", "valor", "$"]
     n = min(len(df_txt), max_scan)
     for i in range(n):
         row_vals = [_strip_acc_lower(x) for x in df_txt.iloc[i].tolist()]
         has_data  = any("data" in v for v in row_vals)
-        has_custo = any(any(k in v for k in row_vals) for k in kws_custo)
+        has_custo = any(any(kw in v for v in row_vals) for kw in kws_custo)
         if has_data and has_custo:
             return i
     return None
@@ -425,6 +426,33 @@ def _parse_currency_br(series: pd.Series) -> pd.Series:
     s = s.apply(lambda x: re.sub(r"[^0-9.\-]", "", x))
     return pd.to_numeric(s, errors="coerce")
 
+def _guess_item_label(df_txt: pd.DataFrame, header_row: int, col_idx: int, fallback: str) -> str:
+    """
+    Tenta descobrir o nome do item olhando a linha ANTERIOR ao cabeçalho
+    no MESMO bloco (ex.: 'PAC (LITROS) – código ...').
+    Se estiver vazio, busca à esquerda até achar algo. Cai no fallback se nada achar.
+    """
+    label = ""
+    if header_row - 1 >= 0:
+        label = str(df_txt.iat[header_row - 1, col_idx]).strip()
+        if not label:
+            # busca alguns passos à esquerda
+            for j in range(col_idx - 1, max(-1, col_idx - 8), -1):
+                try:
+                    v = str(df_txt.iat[header_row - 1, j]).strip()
+                except Exception:
+                    v = ""
+                if v:
+                    label = v
+                    break
+    if not label:
+        label = fallback
+    # enxuga o nome para ficar amigável
+    label = label.replace("\n", " ").strip()
+    if len(label) > 80:
+        label = label[:77] + "..."
+    return label
+
 # ------------------------------------------------------------
 # 3) DETECTAR LINHA DE CABEÇALHO E REDEFINIR COLUNAS
 # ------------------------------------------------------------
@@ -434,124 +462,83 @@ if hdr is None:
     st.stop()
 
 header_vals = [str(x).strip() for x in df_raw.iloc[hdr].tolist()]
-dfq = df_raw.iloc[hdr + 1:].copy()
-dfq.columns = header_vals
+df_all = df_raw.iloc[hdr + 1:].copy()
+df_all.columns = header_vals
 
 # remove colunas cujo nome está vazio (header em branco)
-dfq = dfq.loc[:, [c.strip() != "" for c in dfq.columns]]
+df_all = df_all.loc[:, [c.strip() != "" for c in df_all.columns]]
 
 # ------------------------------------------------------------
-# 4) ESCOLHER O PAR (DATA, CUSTO) DO MESMO BLOCO
-#    -> pega CUSTOS e escolhe a DATA mais próxima à esquerda
-#    (por ÍNDICE de coluna, evitando nomes duplicados como 'DATA')
+# 4) IDENTIFICAR TODOS OS ITENS (pares DATA + CUSTO do mesmo bloco)
 # ------------------------------------------------------------
-norm_cols = [_strip_acc_lower(c) for c in dfq.columns]
-cost_idx_candidates = [i for i, nc in enumerate(norm_cols)
-                       if ("custo" in nc or "custos" in nc or "gasto" in nc or "gastos" in nc or "valor" in nc or "$" in nc)]
-if not cost_idx_candidates:
+norm_cols = [_strip_acc_lower(c) for c in df_all.columns]
+
+# todos os custos/valores
+cost_idx_list = [i for i, nc in enumerate(norm_cols)
+                 if ("custo" in nc or "custos" in nc or "gasto" in nc or "gastos" in nc or "valor" in nc or "$" in nc)]
+
+# todas as datas
+data_idx_list = [i for i, nc in enumerate(norm_cols) if "data" in nc]
+
+if not cost_idx_list:
     st.error("❌ Não encontrei nenhuma coluna de CUSTO/GASTO/VALOR.")
-    st.write("Colunas disponíveis:", list(dfq.columns))
+    st.write("Colunas disponíveis:", list(df_all.columns))
     st.stop()
-
-# Usamos o primeiro custo encontrado (cost mais à esquerda = bloco do PAC)
-cost_idx = cost_idx_candidates[0]
-orig_cost_name = dfq.columns[cost_idx]
-
-data_idx_candidates = [i for i, nc in enumerate(norm_cols) if "data" in nc]
-if not data_idx_candidates:
+if not data_idx_list:
     st.error("❌ Não encontrei nenhuma coluna de DATA.")
-    st.write("Colunas disponíveis:", list(dfq.columns))
+    st.write("Colunas disponíveis:", list(df_all.columns))
     st.stop()
 
-# DATA mais próxima à esquerda do custo; se não houver, a mais próxima
-left_data_idx = [i for i in data_idx_candidates if i <= cost_idx]
-if left_data_idx:
-    data_idx = max(left_data_idx)
-else:
-    data_idx = min(data_idx_candidates, key=lambda i: abs(i - cost_idx))
+items = []  # lista de dicts: {label, df}
+for cost_idx in cost_idx_list:
+    cost_name = df_all.columns[cost_idx]
 
-orig_data_name = dfq.columns[data_idx]
+    # DATA mais próxima à esquerda; se não houver, a mais próxima (esquerda/direita)
+    left_data = [i for i in data_idx_list if i <= cost_idx]
+    if left_data:
+        data_idx = max(left_data)
+    else:
+        data_idx = min(data_idx_list, key=lambda i: abs(i - cost_idx))
+    data_name = df_all.columns[data_idx]
 
-# ------------------------------------------------------------
-# 5) CRIAR CÓPIAS COM NOMES ÚNICOS (evita 'duplicate keys')
-# ------------------------------------------------------------
-dfq = dfq.reset_index(drop=True).copy()
-dfq["DATA_SEL"]  = pd.to_datetime(dfq.iloc[:, data_idx].astype(str), errors="coerce", dayfirst=True)
-dfq["CUSTO_SEL"] = _parse_currency_br(dfq.iloc[:, cost_idx])
+    # cria dataframe do item (seleção por POSIÇÃO evita 'duplicate keys')
+    df_item = pd.DataFrame({
+        "DATA": pd.to_datetime(df_all.iloc[:, data_idx].astype(str), errors="coerce", dayfirst=True),
+        "CUSTO": _parse_currency_br(df_all.iloc[:, cost_idx]),
+    })
+    df_item = df_item.dropna(subset=["DATA", "CUSTO"]).sort_values("DATA")
 
-COL_DATA  = "DATA_SEL"
-COL_CUSTO = "CUSTO_SEL"
+    if df_item.empty:
+        continue
 
-# limpar linhas inválidas e ordenar por data
-dfq = dfq.dropna(subset=[COL_DATA, COL_CUSTO]).sort_values(COL_DATA)
+    # descobrir rótulo do item olhando a linha superior ao cabeçalho
+    label_guess = _guess_item_label(df_raw, hdr, cost_idx, fallback=cost_name)
 
-with st.expander("🔍 Debug (Carta de Custos)"):
-    st.write(f"Linha de cabeçalho detectada: {hdr}")
-    st.write("Coluna original de Data:", orig_data_name, " | índice:", data_idx)
-    st.write("Coluna original de Custo:", orig_cost_name, " | índice:", cost_idx)
-    st.dataframe(dfq[[COL_DATA, COL_CUSTO]].head())
+    items.append({
+        "label": label_guess,
+        "cost_name": cost_name,
+        "data_name": data_name,
+        "data_idx": data_idx,
+        "cost_idx": cost_idx,
+        "df": df_item
+    })
 
-if dfq.empty:
-    st.warning("Sem dados válidos após limpeza (DATA/CUSTO).")
+if not items:
+    st.warning("Nenhum item com dados válidos (DATA + CUSTO) foi encontrado.")
     st.stop()
 
 # ------------------------------------------------------------
-# 6) AGREGAÇÕES — DIÁRIA / SEMANAL (ISO) / MENSAL
+# 5) UI: seleção de itens + toggle de rótulos
 # ------------------------------------------------------------
-df_day = dfq.groupby(COL_DATA, as_index=False)[COL_CUSTO].sum().sort_values(COL_DATA)
+labels_all = [it["label"] for it in items]
+sel_labels = st.multiselect("Itens para exibir nas cartas", labels_all, default=labels_all)
+mostrar_rotulos = st.checkbox("Mostrar rótulos de dados nas cartas", value=True)
 
-df_week = (
-    dfq.assign(semana=dfq[COL_DATA].dt.to_period("W-MON"))
-       .groupby("semana", as_index=False)[COL_CUSTO].sum()
-)
-df_week["Data"] = df_week["semana"].dt.start_time
-
-df_month = (
-    dfq.assign(mes=dfq[COL_DATA].dt.to_period("M"))
-       .groupby("mes", as_index=False)[COL_CUSTO].sum()
-)
-df_month["Data"] = df_month["mes"].dt.to_timestamp()
+# manter apenas selecionados
+items = [it for it in items if it["label"] in sel_labels]
 
 # ------------------------------------------------------------
-# 7) MÉTRICAS (usa último valor válido — evita mostrar 0,00)
-# ------------------------------------------------------------
-def _ultimo_valido_positivo(ser: pd.Series) -> float:
-    s = pd.to_numeric(ser, errors="coerce")
-    s = s[~s.isna()]
-    if s.empty:
-        return 0.0
-    nz = s[s != 0]
-    if not nz.empty:
-        return float(nz.iloc[-1])
-    return float(s.iloc[-1])  # se só houver zeros
-
-# Dia (último dia com custo > 0; se não houver, usa o último disponível)
-ultimo = _ultimo_valido_positivo(df_day[COL_CUSTO])
-
-# Referência (linha) para semana/mês: última com custo > 0; se não houver, última linha
-mask_nz = dfq[COL_CUSTO].fillna(0) != 0
-idx_ref = mask_nz[mask_nz].index[-1] if mask_nz.any() else dfq.index[-1]
-
-iso_week = dfq[COL_DATA].dt.isocalendar()
-dfq["__sem__"]    = iso_week.week.astype(int)
-dfq["__anoiso__"] = iso_week.year.astype(int)
-ult_sem = int(dfq.loc[idx_ref, "__sem__"])
-ult_ano = int(dfq.loc[idx_ref, "__anoiso__"])
-custo_semana = dfq[(dfq["__sem__"] == ult_sem) & (dfq["__anoiso__"] == ult_ano)][COL_CUSTO].sum()
-
-dfq["__mes__"] = dfq[COL_DATA].dt.month
-dfq["__ano__"] = dfq[COL_DATA].dt.year
-ult_mes  = int(dfq.loc[idx_ref, "__mes__"])
-ult_ano2 = int(dfq.loc[idx_ref, "__ano__"])
-custo_mes = dfq[(dfq["__mes__"] == ult_mes) & (dfq["__ano__"] == ult_ano2)][COL_CUSTO].sum()
-
-m1, m2, m3 = st.columns(3)
-m1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-m2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-m3.metric("Custo do Mês",    f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
-# ------------------------------------------------------------
-# 8) FUNÇÃO DA CARTA (X-barra) COM RÓTULOS E EIXO EM R$
+# 6) FUNÇÕES DE CARTA, FORMATAÇÃO E MÉTRICAS
 # ------------------------------------------------------------
 from matplotlib.ticker import FuncFormatter
 
@@ -580,7 +567,7 @@ def desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
         ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70, zorder=3)
         ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70, zorder=3)
 
-    # Formatar eixo Y em moeda BR
+    # Eixo Y em moeda BR
     ax.yaxis.set_major_formatter(FuncFormatter(_fmt_brl))
 
     # Rótulos de dados
@@ -604,16 +591,83 @@ def desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
     ax.legend(loc="best")
     st.pyplot(fig)
 
+def _ultimo_valido_positivo(ser: pd.Series) -> float:
+    s = pd.to_numeric(ser, errors="coerce")
+    s = s[~s.isna()]
+    if s.empty:
+        return 0.0
+    nz = s[s != 0]
+    if not nz.empty:
+        return float(nz.iloc[-1])
+    return float(s.iloc[-1])
+
+def _metricas_item(df_item: pd.DataFrame):
+    # Dia
+    ultimo = _ultimo_valido_positivo(df_item["CUSTO"])
+
+    # Semana/mês: referência é a última linha com custo > 0; se não houver, a última
+    mask_nz = df_item["CUSTO"].fillna(0) != 0
+    idx_ref = mask_nz[mask_nz].index[-1] if mask_nz.any() else df_item.index[-1]
+
+    iso_week = df_item["DATA"].dt.isocalendar()
+    df_tmp = df_item.copy()
+    df_tmp["__sem__"]    = iso_week.week.astype(int)
+    df_tmp["__anoiso__"] = iso_week.year.astype(int)
+    ult_sem = int(df_tmp.loc[idx_ref, "__sem__"])
+    ult_ano = int(df_tmp.loc[idx_ref, "__anoiso__"])
+    custo_semana = df_tmp[(df_tmp["__sem__"] == ult_sem) & (df_tmp["__anoiso__"] == ult_ano)]["CUSTO"].sum()
+
+    df_tmp["__mes__"] = df_tmp["DATA"].dt.month
+    df_tmp["__ano__"] = df_tmp["DATA"].dt.year
+    ult_mes  = int(df_tmp.loc[idx_ref, "__mes__"])
+    ult_ano2 = int(df_tmp.loc[idx_ref, "__ano__"])
+    custo_mes = df_tmp[(df_tmp["__mes__"] == ult_mes) & (df_tmp["__ano__"] == ult_ano2)]["CUSTO"].sum()
+
+    return ultimo, custo_semana, custo_mes
+
 # ------------------------------------------------------------
-# 9) CARTAS (com toggle de rótulos)
+# 7) ABAS — UMA POR ITEM
 # ------------------------------------------------------------
-mostrar_rotulos = st.checkbox("Mostrar rótulos de dados nas cartas", value=True)
+tabs = st.tabs([it["label"] for it in items])
 
-st.subheader("📅 Carta Diária")
-desenhar_carta(df_day[COL_DATA], df_day[COL_CUSTO], "Custo Diário (R$)", "R$", mostrar_rotulos=mostrar_rotulos)
+for tab, it in zip(tabs, items):
+    with tab:
+        df_item = it["df"]
 
-st.subheader("🗓️ Carta Semanal (ISO)")
-desenhar_carta(df_week["Data"], df_week[COL_CUSTO], "Custo Semanal (R$)", "R$", mostrar_rotulos=mostrar_rotulos)
+        # Métricas do item
+        ultimo, custo_semana, custo_mes = _metricas_item(df_item)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c3.metric("Custo do Mês",    f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-st.subheader("📆 Carta Mensal")
-desenhar_carta(df_month["Data"], df_month[COL_CUSTO], "Custo Mensal (R$)", "R$", mostrar_rotulos=mostrar_rotulos)
+        # Agregações do item
+        df_day = df_item.groupby("DATA", as_index=False)["CUSTO"].sum().sort_values("DATA")
+
+        df_week = (
+            df_item.assign(semana=df_item["DATA"].dt.to_period("W-MON"))
+                   .groupby("semana", as_index=False)["CUSTO"].sum()
+        )
+        df_week["Data"] = df_week["semana"].dt.start_time
+
+        df_month = (
+            df_item.assign(mes=df_item["DATA"].dt.to_period("M"))
+                   .groupby("mes", as_index=False)["CUSTO"].sum()
+        )
+        df_month["Data"] = df_month["mes"].dt.to_timestamp()
+
+        # Cartas
+        st.subheader("📅 Carta Diária")
+        desenhar_carta(df_day["DATA"], df_day["CUSTO"], f"Custo Diário (R$) — {it['label']}", "R$", mostrar_rotulos=mostrar_rotulos)
+
+        st.subheader("🗓️ Carta Semanal (ISO)")
+        desenhar_carta(df_week["Data"], df_week["CUSTO"], f"Custo Semanal (R$) — {it['label']}", "R$", mostrar_rotulos=mostrar_rotulos)
+
+        st.subheader("📆 Carta Mensal")
+        desenhar_carta(df_month["Data"], df_month["CUSTO"], f"Custo Mensal (R$) — {it['label']}", "R$", mostrar_rotulos=mostrar_rotulos)
+
+        # Debug opcional
+        with st.expander("🔍 Debug do item"):
+            st.write("Coluna de DATA original:", it["data_name"], " | índice:", it["data_idx"])
+            st.write("Coluna de CUSTO original:", it["cost_name"], " | índice:", it["cost_idx"])
+            st.dataframe(df_item.head())
