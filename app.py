@@ -502,151 +502,99 @@ with colD:
     if out_vn: st.caption("Outros: " + ", ".join(out_vn))
     st.caption(f"Ativas: {len(ok_vn)} de {len(v_nitr)}")
 # =========================================================
-# CARTAS DE CONTROLE – MULTI QUÍMICOS (CORRIGIDO)
+# CARTAS DE CONTROLE – MULTI QUÍMICOS (FUNCIONANDO)
 # =========================================================
 
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custos dos Químicos")
 
-# Aba verdadeira dos químicos ("Seleção Químicos")
-GID_QUIM = "668859455"
-URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
+# ---- LEITURA CORRETA: linha 2 é cabeçalho, linha 1 é nome dos químicos ----
+dfraw = pd.read_csv(URL_QUIM, header=None)
 
-dfq = pd.read_csv(URL_QUIM)
-dfq.columns = [str(c).strip() for c in dfq.columns]
+linha_nomes = dfraw.iloc[0].tolist()      # linha azul (títulos dos químicos)
+dfq = dfraw.iloc[1:].copy()               # dados começam na linha 2
+dfq.columns = dfraw.iloc[1].tolist()      # cabeçalhos reais (DATA, CUSTO $$ etc.)
 
-# ------------------------------------------------------------
-# DETECÇÃO EXATA BASEADA NA SUA PLANILHA (sheet_13 real)
-# ------------------------------------------------------------
+dfq = dfq.reset_index(drop=True)
 
+# ---- Identifica DATA e CUSTO $$ ----
 colunas = dfq.columns.tolist()
 
-# As colunas "DATA" aparecem literalmente como "DATA"
-indices_data = [i for i, c in enumerate(colunas) if c.strip().upper() == "DATA"]
-
-# A coluna de custo correta é sempre "CUSTO $$" (em maiúsculo)
-indices_custo = [i for i, c in enumerate(colunas) if c.strip() == "CUSTO $$"]
+indices_data = [i for i, c in enumerate(colunas) if str(c).strip().upper() == "DATA"]
+indices_custo = [i for i, c in enumerate(colunas) if str(c).strip().upper() == "CUSTO $$"]
 
 dfs_quim = []
 
-def preparar_dados_quimico(df, idx_data, idx_custo, nome_quimico):
-    data_col = df.columns[idx_data]
-    custo_col = df.columns[idx_custo]
+def preparar_dados_quimico(df, idx_data, idx_custo, nome):
+    dtmp = df[[df.columns[idx_data], df.columns[idx_custo]]].copy()
+    dtmp.columns = ["DATA", "CUSTO"]
 
-    df_local = df[[data_col, custo_col]].copy()
-    df_local.columns = ["DATA", "CUSTO"]
+    dtmp["DATA"] = pd.to_datetime(dtmp["DATA"], dayfirst=True, errors="coerce")
 
-    df_local["DATA"] = pd.to_datetime(df_local["DATA"], errors="coerce", dayfirst=True)
-
-    df_local["CUSTO"] = (
-        df_local["CUSTO"]
-            .astype(str)
-            .str.replace("R$", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.replace(".", "", regex=False)
-            .str.replace(",", ".", regex=False)
+    dtmp["CUSTO"] = (
+        dtmp["CUSTO"].astype(str)
+        .str.replace("R$", "")
+        .str.replace(" ", "")
+        .str.replace(".", "")
+        .str.replace(",", ".")
     )
-    df_local["CUSTO"] = pd.to_numeric(df_local["CUSTO"], errors="coerce")
+    dtmp["CUSTO"] = pd.to_numeric(dtmp["CUSTO"], errors="coerce")
 
-    df_local = df_local.dropna(subset=["DATA", "CUSTO"]).sort_values("DATA")
-    df_local["Quimico"] = nome_quimico
+    dtmp = dtmp.dropna(subset=["DATA", "CUSTO"])
+    dtmp["Quimico"] = nome
+    return dtmp
 
-    return df_local
-
-# percorre cada coluna DATA encontrada
 for idx_data in indices_data:
 
-    # encontra o próximo "CUSTO $$" após o DATA
     custos_validos = [i for i in indices_custo if i > idx_data]
     if not custos_validos:
         continue
 
     idx_custo = custos_validos[0]
 
-    # Nome do químico = cabeçalho do bloco (linha azul na sua planilha)
-    # Ex: "PAC (LITROS) – código 50852846"
-    nome_quimico = colunas[idx_data - 1] if idx_data > 0 else f"Químico {len(dfs_quim)+1}"
+    # nome = linha superior (linha azul) no mesmo índice de COLUNA
+    nome_quimico = linha_nomes[idx_data]
 
-    # Se por algum motivo vier vazio, cria nome automático
-    if not nome_quimico or nome_quimico.upper() == "DATA":
+    if not isinstance(nome_quimico, str) or nome_quimico.strip() == "":
         nome_quimico = f"Químico {len(dfs_quim)+1}"
 
     dfs_quim.append(preparar_dados_quimico(dfq, idx_data, idx_custo, nome_quimico))
 
-# valida
 if not dfs_quim:
-    st.error("Nenhum químico detectado. Verifique a aba Seleção Químicos.")
+    st.error("Nenhum químico detectado. A leitura da aba foi corrigida — revise a aba Seleção Químicos.")
     st.stop()
 
 df_final = pd.concat(dfs_quim, ignore_index=True)
 
-# ------------------------------------------------------------
-# Função da Carta de Controle
-# ------------------------------------------------------------
-
+# ---- Função da carta ----
 def desenhar_carta(x, y, titulo, ylabel):
     y = pd.Series(y).astype(float)
-    n = len(y)
     media = y.mean()
-    desvio = y.std(ddof=1) if n > 1 else 0.0
+    desvio = y.std(ddof=1) if len(y) > 1 else 0
+
     LSC = media + 3 * desvio
     LIC = media - 3 * desvio
 
     fig, ax = plt.subplots(figsize=(12, 5))
-
     ax.plot(x, y, marker="o", color="#1565C0")
-    ax.axhline(media, color="blue", linestyle="--", label="Média")
 
+    ax.axhline(media, linestyle="--", color="blue", label="Média")
     if desvio > 0:
-        ax.axhline(LSC, color="red", linestyle="--", label="LSC (+3σ)")
-        ax.axhline(LIC, color="red", linestyle="--", label="LIC (−3σ)")
-
-        acima = y > LSC
-        abaixo = y < LIC
-
-        ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70)
-        ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70)
+        ax.axhline(LSC, linestyle="--", color="red", label="LSC (+3σ)")
+        ax.axhline(LIC, linestyle="--", color="red", label="LIC (−3σ)")
 
     ax.set_title(titulo)
-    ax.set_ylabel(ylabel)
     ax.set_xlabel("Data")
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend()
+    ax.set_ylabel(ylabel)
+    ax.grid(True)
 
     st.pyplot(fig)
 
-# ------------------------------------------------------------
-# Gera as cartas para cada químico
-# ------------------------------------------------------------
-
+# ---- Plota para cada químico ----
 for quim in df_final["Quimico"].unique():
 
     bloco = df_final[df_final["Quimico"] == quim]
-
     st.subheader(f"📌 {quim}")
 
-    # Diária
-    st.markdown("### 📅 Carta Diária")
+    st.markdown("### 📅 Diário")
     desenhar_carta(bloco["DATA"], bloco["CUSTO"], f"Custo Diário — {quim}", "Custo (R$)")
-
-    # Semanal
-    df_week = (
-        bloco.assign(semana=bloco["DATA"].dt.to_period("W-MON"))
-             .groupby("semana", as_index=False)["CUSTO"]
-             .sum()
-    )
-    df_week["Data"] = df_week["semana"].dt.start_time
-
-    st.markdown("### 🗓️ Carta Semanal")
-    desenhar_carta(df_week["Data"], df_week["CUSTO"], f"Custo Semanal — {quim}", "Custo (R$)")
-
-    # Mensal
-    df_month = (
-        bloco.assign(mes=bloco["DATA"].dt.to_period("M"))
-             .groupby("mes", as_index=False)["CUSTO"]
-             .sum()
-    )
-    df_month["Data"] = df_month["mes"].dt.to_timestamp()
-
-    st.markdown("### 📆 Carta Mensal")
-    desenhar_carta(df_month["Data"], df_month["CUSTO"], f"Custo Mensal — {quim}", "Custo (R$)")
