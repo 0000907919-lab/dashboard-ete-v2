@@ -4,53 +4,55 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
- 
+import matplotlib.pyplot as plt
+
 # =========================
 # CONFIGURAÇÃO DA PÁGINA
 # =========================
 st.set_page_config(page_title="Dashboard Operacional ETE", layout="wide")
- 
+
 # =========================
-# GOOGLE SHEETS
+# GOOGLE SHEETS – ABA 1 (Respostas ao Formulário / Operacional)
 # =========================
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
-GID = "1283870792"
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
- 
+GID_FORM = "1283870792"  # aba com o formulário operacional
+CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_FORM}"
+
 # -------------------------
-# Carrega a planilha
+# Carrega a planilha (df = operacional)
 # -------------------------
 df = pd.read_csv(CSV_URL)
 df.columns = [str(c).strip() for c in df.columns]
- 
+
 # =========================
 # NORMALIZAÇÃO / AUXILIARES
 # =========================
 def _strip_accents(s: str) -> str:
     import unicodedata
-    return "".join(
-        c for c in unicodedata.normalize("NFD", s)
-        if unicodedata.category(c) != "Mn"
-    )
- 
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+def _slug(s: str) -> str:
+    # gera chave curta para evitar IDs duplicados em gráficos (Plotly)
+    return _strip_accents(str(s).lower()).replace(" ", "-").replace("–", "-").replace("/", "-")
+
 cols_lower_noacc = [_strip_accents(c.lower()) for c in df.columns]
 COLMAP = dict(zip(cols_lower_noacc, df.columns))  # normalizado -> original
- 
+
 # Palavras‑chave
-KW_CACAMBA = ["cacamba", "caçamba"]
-KW_NITR = ["nitr", "nitrificacao", "nitrificação"]
-KW_MBBR = ["mbbr"]
-KW_VALVULA = ["valvula", "válvula"]
-KW_SOPRADOR = ["soprador", "oxigenacao", "oxigenação"]
- 
-# Grupos adicionais (puxar o que faltava)
-KW_NIVEIS_OUTROS = ["nivel", "nível"]  # será filtrado excluindo caçamba
-KW_VAZAO = ["vazao", "vazão"]
-KW_PH = ["ph " , " ph"]      # espaços para evitar bater em 'oxipH' etc
-KW_SST = ["sst ", " sst", "ss "]  # inclui SS/SST
-KW_DQO = ["dqo " , " dqo"]
-KW_ESTADOS = ["tridecanter", "desvio", "tempo de descarte", "volante"]
- 
+KW_CACAMBA   = ["cacamba", "caçamba"]
+KW_NITR      = ["nitr", "nitrificacao", "nitrificação"]
+KW_MBBR      = ["mbbr"]
+KW_VALVULA   = ["valvula", "válvula"]
+KW_SOPRADOR  = ["soprador", "oxigenacao", "oxigenação"]
+
+# Grupos adicionais
+KW_NIVEIS_OUTROS = ["nivel", "nível"]      # será filtrado excluindo caçamba
+KW_VAZAO         = ["vazao", "vazão"]
+KW_PH            = ["ph ", " ph"]          # espaços para evitar bater em 'oxipH' etc
+KW_SST           = ["sst ", " sst", "ss "]  # inclui SS/SST
+KW_DQO           = ["dqo ", " dqo"]
+KW_ESTADOS       = ["tridecanter", "desvio", "tempo de descarte", "volante"]
+
 # -------------------------
 # Conversões e utilidades
 # -------------------------
@@ -59,6 +61,7 @@ def to_float_ptbr(x):
     if pd.isna(x):
         return np.nan
     s = str(x).strip().replace("%", "")
+    # "10,5" -> "10.5" ; "1.234,5" -> "1234.5"
     if "," in s and "." not in s:
         s = s.replace(",", ".")
     elif "." in s and "," in s:
@@ -67,15 +70,15 @@ def to_float_ptbr(x):
         return float(s)
     except:
         return np.nan
- 
-def last_valid_raw(df, col):
+
+def last_valid_raw(df_local, col):
     """Último valor não vazio de uma coluna."""
-    s = df[col].replace(r"^\s*$", np.nan, regex=True)
+    s = df_local[col].replace(r"^\s*$", np.nan, regex=True)
     valid = s.dropna()
     if valid.empty:
         return None
     return valid.iloc[-1]
- 
+
 def _filter_columns_by_keywords(all_cols_norm_noacc, keywords):
     """Retorna nomes originais das colunas que contenham QUALQUER keyword."""
     kws = [_strip_accents(k.lower()) for k in keywords]
@@ -84,14 +87,14 @@ def _filter_columns_by_keywords(all_cols_norm_noacc, keywords):
         if any(k in c_norm for k in kws):
             selected_norm.append(c_norm)
     return [COLMAP[c] for c in selected_norm]
- 
+
 def _extract_number(base: str) -> str:
     return "".join(ch for ch in base if ch.isdigit())
- 
+
 def _remove_brackets(text: str) -> str:
     # Remove qualquer coisa após '['
     return text.split("[", 1)[0].strip()
- 
+
 def _units_from_label(label: str) -> str:
     s = _strip_accents(label.lower())
     if "m3/h" in s or "m³/h" in label.lower():
@@ -101,10 +104,14 @@ def _units_from_label(label: str) -> str:
     if "(%)" in label or "%" in label:
         return "%"
     return ""
- 
+
 # =========================
 # PADRONIZAÇÃO DE NOMES (TÍTULOS)
 # =========================
+def re_replace_case_insensitive(s, pattern, repl):
+    import re
+    return re.sub(pattern, repl, s, flags=re.IGNORECASE)
+
 def _nome_exibicao(label_original: str) -> str:
     """
     Padroniza nomes para:
@@ -116,11 +123,11 @@ def _nome_exibicao(label_original: str) -> str:
     base_clean = _remove_brackets(label_original)
     base = _strip_accents(base_clean.lower()).strip()
     num = _extract_number(base)
- 
+
     # Caçambas
     if "cacamba" in base:
         return f"Nível da caçamba {num}" if num else "Nível da caçamba"
- 
+
     # Sopradores (inclui Oxigenação)
     if ("soprador" in base) or ("oxigenacao" in base):
         if any(k in base for k in KW_NITR):
@@ -128,7 +135,7 @@ def _nome_exibicao(label_original: str) -> str:
         if any(k in base for k in KW_MBBR):
             return f"Soprador de MBBR {num}" if num else "Soprador de MBBR"
         return f"Soprador {num}" if num else "Soprador"
- 
+
     # Válvulas
     if "valvula" in base:
         if any(k in base for k in KW_NITR):
@@ -136,7 +143,7 @@ def _nome_exibicao(label_original: str) -> str:
         if any(k in base for k in KW_MBBR):
             return f"Válvula de MBBR {num}" if num else "Válvula de MBBR"
         return f"Válvula {num}" if num else "Válvula"
- 
+
     # Ajustes de capitalização comuns (pH, DQO, SST, Vazão, Nível, MIX)
     txt = base_clean
     replacements = {
@@ -148,13 +155,9 @@ def _nome_exibicao(label_original: str) -> str:
     }
     for k, v in replacements.items():
         txt = re_replace_case_insensitive(txt, k, v)
- 
+
     return txt.strip()
- 
-def re_replace_case_insensitive(s, pattern, repl):
-    import re
-    return re.sub(pattern, repl, s, flags=re.IGNORECASE)
- 
+
 # =========================
 # GAUGES (somente Caçambas)
 # =========================
@@ -162,9 +165,9 @@ def make_speedometer(val, label):
     nome_exibicao = _nome_exibicao(label)
     if val is None or np.isnan(val):
         val = 0.0
- 
+
     color = "#43A047" if val >= 70 else "#FB8C00" if val >= 30 else "#E53935"
- 
+
     return go.Indicator(
         mode="gauge+number",
         value=float(val),
@@ -173,17 +176,16 @@ def make_speedometer(val, label):
         gauge={"axis": {"range": [0, 100]}, "bar": {"color": color}},
         domain={"x": [0, 1], "y": [0, 1]},
     )
- 
+
 def render_cacambas_gauges(title, n_cols=4):
     cols_orig = _filter_columns_by_keywords(cols_lower_noacc, KW_CACAMBA)
-    # evita pegar colunas de sopradores/valvulas que por acaso tenham "caçamba"
     cols_orig = [c for c in cols_orig if any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
- 
+
     if not cols_orig:
         st.info("Nenhuma caçamba encontrada.")
         return
- 
+
     n_rows = int(np.ceil(len(cols_orig) / n_cols))
     fig = make_subplots(
         rows=n_rows,
@@ -192,46 +194,40 @@ def render_cacambas_gauges(title, n_cols=4):
         horizontal_spacing=0.05,
         vertical_spacing=0.15
     )
- 
+
     for i, c in enumerate(cols_orig):
         raw = last_valid_raw(df, c)
         val = to_float_ptbr(raw)
         r = i // n_cols + 1
         cc = i % n_cols + 1
         fig.add_trace(make_speedometer(val, c), row=r, col=cc)
- 
+
     fig.update_layout(
         height=max(280 * n_rows, 280),
         margin=dict(l=10, r=10, t=10, b=10),
     )
-    st.subheader(title)
-    st.plotly_chart(fig, use_container_width=True)
- 
+    # key única evita StreamlitDuplicateElementId
+    st.plotly_chart(fig, use_container_width=True, key=f"plot-gauges-{_slug(title)}")
+
 # =========================
 # TILES (cards genéricos)
 # =========================
 def _tile_color_and_text(raw_value, val_num, label, force_neutral_numeric=False):
     """Define cor e texto do card conforme tipo de dado."""
-    # Estados textuais
     if raw_value is None:
         return "#9E9E9E", "—"
- 
-    # numérico
+
     if not np.isnan(val_num):
         units = _units_from_label(label)
         if units == "%":
-            # Percentuais com semáforo
             fill = "#43A047" if val_num >= 70 else "#FB8C00" if val_num >= 30 else "#E53935"
             return fill, f"{val_num:.1f}%"
         else:
-            # Métricas de processo com cor neutra (pH, DQO, SST, Vazões, etc.)
             if force_neutral_numeric:
                 return "#546E7A", f"{val_num:.2f}{units}"
-            # Se não for neutro, usa mesma regra de semáforo
             fill = "#43A047" if val_num >= 70 else "#FB8C00" if val_num >= 30 else "#E53935"
             return fill, f"{val_num:.1f}{units}"
- 
-    # texto (OK/erro etc)
+
     txt = str(raw_value).strip()
     t = _strip_accents(txt.lower())
     if t in ["ok", "ligado", "aberto", "rodando", "on"]:
@@ -239,101 +235,97 @@ def _tile_color_and_text(raw_value, val_num, label, force_neutral_numeric=False)
     if t in ["nok", "falha", "erro", "fechado", "off"]:
         return "#E53935", txt.upper()
     return "#FB8C00", txt
- 
+
 def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=False):
-    cols_orig = [c for c in cols_orig if c]  # safe
+    cols_orig = [c for c in cols_orig if c]
     cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
     if not cols_orig:
         st.info(f"Nenhum item encontrado para: {title}")
         return
- 
+
     fig = go.Figure()
     n_rows = int(np.ceil(len(cols_orig) / n_cols))
     fig.update_xaxes(visible=False, range=[0, n_cols])
     fig.update_yaxes(visible=False, range=[0, n_rows])
- 
+
     for i, c in enumerate(cols_orig):
         raw = last_valid_raw(df, c)
         val = to_float_ptbr(raw)
         fill, txt = _tile_color_and_text(raw, val, c, force_neutral_numeric=force_neutral_numeric)
- 
+
         r = i // n_cols
         cc = i % n_cols
         x0, x1 = cc + 0.05, cc + 0.95
         y0, y1 = (n_rows - 1 - r) + 0.05, (n_rows - 1 - r) + 0.95
- 
+
         fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
                       fillcolor=fill, line=dict(color="white", width=1))
- 
+
         nome = _nome_exibicao(c)
-        # Valor
         fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2 + 0.15,
                            text=f"<b style='font-size:18px'>{txt}</b>",
                            showarrow=False, font=dict(color="white"))
-        # Nome do item
         fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2 - 0.15,
                            text=f"<span style='font-size:12px'>{nome}</span>",
                            showarrow=False, font=dict(color="white"))
- 
+
     fig.update_layout(height=max(170 * n_rows, 170),
                       margin=dict(l=10, r=10, t=10, b=10))
     st.subheader(title)
-    st.plotly_chart(fig, use_container_width=True)
- 
+    st.plotly_chart(fig, use_container_width=True, key=f"plot-tiles-{_slug(title)}")
+
 def render_tiles_split(title_base, base_keywords, n_cols=4):
     """Cards: Nitrificação e MBBR para Válvulas/Sopradores."""
     # Nitrificação
     cols_nitr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_NITR)
     cols_nitr = [c for c in cols_nitr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     _render_tiles_from_cols(f"{title_base} – Nitrificação", cols_nitr, n_cols=n_cols)
- 
+
     # MBBR
     cols_mbbr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_MBBR)
     cols_mbbr = [c for c in cols_mbbr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     _render_tiles_from_cols(f"{title_base} – MBBR", cols_mbbr, n_cols=n_cols)
- 
+
 # -------------------------
 # Grupos adicionais ("puxar o que faltava")
 # -------------------------
 def render_outros_niveis():
-    # nível, mas não caçambas
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_NIVEIS_OUTROS)
     cols = [c for c in cols if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
     if not cols:
         return
-    # Para níveis com (%) seguimos semáforo; demais ficam neutros
     _render_tiles_from_cols("Níveis (MAB/TQ de Lodo)", cols, n_cols=3, force_neutral_numeric=False)
- 
+
 def render_vazoes():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_VAZAO)
     if not cols:
         return
     _render_tiles_from_cols("Vazões", cols, n_cols=3, force_neutral_numeric=True)
- 
+
 def render_ph():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_PH)
     if not cols:
         return
     _render_tiles_from_cols("pH", cols, n_cols=4, force_neutral_numeric=True)
- 
+
 def render_sst():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_SST)
     if not cols:
         return
     _render_tiles_from_cols("Sólidos (SS/SST)", cols, n_cols=4, force_neutral_numeric=True)
- 
+
 def render_dqo():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_DQO)
     if not cols:
         return
     _render_tiles_from_cols("DQO", cols, n_cols=4, force_neutral_numeric=True)
- 
+
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
     if not cols:
         return
     _render_tiles_from_cols("Estados / Equipamentos", cols, n_cols=3, force_neutral_numeric=False)
- 
+
 # =========================
 # CABEÇALHO (última medição)
 # =========================
@@ -345,7 +337,7 @@ def header_info():
         k = _strip_accents(c.lower())
         if k in [_strip_accents(x) for x in cand]:
             found[k] = c
- 
+
     col0, col1, col2 = st.columns(3)
     if "carimbo de data/hora" in found:
         col0.metric("Último carimbo", str(last_valid_raw(df, found["carimbo de data/hora"])))
@@ -353,135 +345,184 @@ def header_info():
         col0.metric("Data", str(last_valid_raw(df, found["data"])))
     if "operador" in found:
         col1.metric("Operador", str(last_valid_raw(df, found["operador"])))
-    # espaço reservado para algo adicional
     col2.metric("Registros", f"{len(df)} linhas")
- 
+
 # =========================
-# DASHBOARD
+# DASHBOARD (como estava)
 # =========================
 st.title("Dashboard Operacional ETE")
 header_info()
- 
+
 # Caçambas (gauge)
 render_cacambas_gauges("Caçambas")
- 
+
 # Válvulas (cards) — Nitrificação e MBBR
 render_tiles_split("Válvulas", KW_VALVULA)
- 
+
 # Sopradores (cards) — Nitrificação e MBBR
 render_tiles_split("Sopradores", KW_SOPRADOR)
- 
-# ---- Indicadores adicionais (o que estava faltando puxar)
+
+# ---- Indicadores adicionais
 render_outros_niveis()
 render_vazoes()
 render_ph()
 render_sst()
 render_dqo()
 render_estados()
-# ============================================================
-#                 CARTA DE CONTROLE (RODAPÉ)
-#                 Usando Matplotlib – Custo Diário (R$)
-# ============================================================
 
+# ============================================================
+#            CARTAS DE CONTROLE – DIÁRIA, SEMANAL, MENSAL
+#            (Rodapé da mesma página)
+# ============================================================
 st.markdown("---")
-st.header("🔴 Carta de Controle – Custo Diário (R$)")
+st.header("🔴 Cartas de Controle — Custo Diário (R$)")
 
-# --- Lê a aba 'Controle de Químicos' da MESMA planilha ---
-SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
+# Botão de recarregar (útil no Streamlit Cloud)
+if st.button("🔄 Recarregar cartas"):
+    st.rerun()
+
+# -------- LER ABA CONTROLE DE QUÍMICOS -------------
 GID_QUIM = "668859455"  # gid da aba 'Controle de Químicos'
 URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
 
-try:
-    df_quim = pd.read_csv(URL_QUIM)
-    df_quim.columns = [str(c).strip() for c in df_quim.columns]
-except Exception as e:
-    st.error(f"Não foi possível carregar a aba 'Controle de Químicos'. Erro: {e}")
+dfq = pd.read_csv(URL_QUIM)
+dfq.columns = [str(c).strip() for c in dfq.columns]
+
+# Detectar a coluna de data
+data_cols = [c for c in dfq.columns if "data" in c.lower()]
+if not data_cols:
+    st.error("❌ Nenhuma coluna de Data encontrada.")
+    st.stop()
+COL_DATA = data_cols[0]
+
+# Parâmetro — custo diário
+PARAM = "Custo Diario (R$)"
+if PARAM not in dfq.columns:
+    st.error("❌ A coluna 'Custo Diario (R$)' não foi encontrada.")
+    st.write("Colunas disponíveis:", dfq.columns.tolist())
     st.stop()
 
-# --- Descobre a coluna de data e ordena ---
-col_data_candidates = [c for c in df_quim.columns if "data" in c.lower()]
-if not col_data_candidates:
-    st.error("Nenhuma coluna de data encontrada na aba Controle de Químicos.")
+# ---------- LIMPEZA BR ----------
+# Corrigir Data (DD/MM/AAAA)
+dfq[COL_DATA] = pd.to_datetime(dfq[COL_DATA], errors="coerce", dayfirst=True)
+
+# Corrigir número brasileiro para float
+dfq[PARAM] = (
+    dfq[PARAM]
+    .astype(str)
+    .str.replace("R$", "", regex=False)
+    .str.replace(" ", "", regex=False)
+    .str.replace(".", "", regex=False)     # remove milhar
+    .str.replace(",", ".", regex=False)    # vírgula -> ponto
+)
+dfq[PARAM] = pd.to_numeric(dfq[PARAM], errors="coerce")
+
+dfq = dfq.dropna(subset=[COL_DATA, PARAM]).sort_values(COL_DATA)
+
+with st.expander("🔍 Dados carregados (debug)"):
+    st.dataframe(dfq[[COL_DATA, PARAM]].tail())
+
+if dfq.empty:
+    st.warning("Sem dados válidos para gerar as cartas.")
     st.stop()
 
-col_data = col_data_candidates[0]
-df_quim[col_data] = pd.to_datetime(df_quim[col_data], errors="coerce")
-df_quim = df_quim.dropna(subset=[col_data]).sort_values(col_data)
+# ===========================================================
+#   AGREGAÇÕES — DIÁRIA, SEMANAL (ISO), MENSAL
+# ===========================================================
+# DIÁRIA (soma por dia, em caso de duplicidades no mesmo dia)
+df_day = dfq.groupby(COL_DATA, as_index=False)[PARAM].sum().sort_values(COL_DATA)
 
-# --- Parâmetro padrão: Custo Diário (R$) ---
-parametro = "Custo Diario (R$)"
-if parametro not in df_quim.columns:
-    st.error("A coluna 'Custo Diario (R$)' não existe na aba Controle de Químicos.")
-    st.stop()
+# SEMANAL (ISO – semanas começam na segunda)
+df_week = (
+    dfq.assign(semana=dfq[COL_DATA].dt.to_period("W-MON"))
+       .groupby("semana", as_index=False)[PARAM].sum()
+)
+df_week["Data"] = df_week["semana"].dt.start_time
 
-# Garante numérico e descarta inválidos
-df_quim[parametro] = pd.to_numeric(df_quim[parametro], errors="coerce")
-df_quim = df_quim.dropna(subset=[parametro])
+# MENSAL (soma por mês calendário)
+df_month = (
+    dfq.assign(mes=dfq[COL_DATA].dt.to_period("M"))
+       .groupby("mes", as_index=False)[PARAM].sum()
+)
+df_month["Data"] = df_month["mes"].dt.to_timestamp()
 
-if df_quim.empty:
-    st.info("Sem dados válidos para o Custo Diário (R$).")
-else:
-    # Série para a carta
-    x = df_quim[col_data]
-    y = df_quim[parametro].astype(float)
-
-    # Estatística da carta (X-barra simples)
+# ===========================================================
+#     FUNÇÃO PARA DESENHAR CARTA X-BARRA (SEM key)
+# ===========================================================
+def desenhar_carta(x, y, titulo, ylabel):
+    y = pd.Series(y).astype(float)
+    n = len(y)
     media = y.mean()
-    desvio = y.std(ddof=1) if len(y) > 1 else 0.0
-    LSC = media + 3 * desvio
-    LIC = media - 3 * desvio
+    desvio = y.std(ddof=1) if n > 1 else 0.0
+    LSC = media + 3*desvio
+    LIC = media - 3*desvio
 
-    # ---------------- Indicadores resumidos ----------------
-    # Semana ISO e mês numérico/ano para somatórios corretos
-    iso = df_quim[col_data].dt.isocalendar()
-    df_quim["__semana__"] = iso.week.astype(int)
-    df_quim["__anoiso__"] = iso.year.astype(int)
-    df_quim["__mes__"] = df_quim[col_data].dt.month.astype(int)
-    df_quim["__ano__"] = df_quim[col_data].dt.year.astype(int)
+    fig, ax = plt.subplots(figsize=(12,5))
 
-    ult_valor = y.iloc[-1]
-    ult_semana = df_quim["__semana__"].iloc[-1]
-    ult_anoiso = df_quim["__anoiso__"].iloc[-1]
-    ult_mes = df_quim["__mes__"].iloc[-1]
-    ult_ano = df_quim["__ano__"].iloc[-1]
+    ax.plot(x, y, marker="o", label=titulo, color="#1565C0")
+    ax.axhline(media, color="blue", linestyle="--", label="Média")
 
-    custo_semana = df_quim[
-        (df_quim["__semana__"] == ult_semana) & (df_quim["__anoiso__"] == ult_anoiso)
-    ][parametro].sum()
-
-    custo_mes = df_quim[
-        (df_quim["__mes__"] == ult_mes) & (df_quim["__ano__"] == ult_ano)
-    ][parametro].sum()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Custo do dia", f"R$ {ult_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c2.metric("Custo da semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c3.metric("Custo do mês", f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c4.metric("Média (carta)", f"R$ {media:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
-    # ---------------- Gráfico – Matplotlib ----------------
-    fig, ax = plt.subplots(figsize=(12, 5))
-
-    # Curva de valores
-    ax.plot(x, y, marker="o", color="#1565C0", label="Custo Diário")
-
-    # Linhas de referência
-    ax.axhline(media, color="blue", linestyle="--", linewidth=2, label="Média")
     if desvio > 0:
-        ax.axhline(LSC, color="#D32F2F", linestyle="--", linewidth=2, label="LSC (+3σ)")
-        ax.axhline(LIC, color="#D32F2F", linestyle="--", linewidth=2, label="LIC (−3σ)")
-
-    # Destaque pontos fora de controle
-    if desvio > 0:
+        ax.axhline(LSC, color="red", linestyle="--", label="LSC (+3σ)")
+        ax.axhline(LIC, color="red", linestyle="--", label="LIC (−3σ)")
         acima = y > LSC
         abaixo = y < LIC
-        ax.scatter(x[acima], y[acima], color="#D32F2F", s=60, marker="^", label="Acima do LSC")
-        ax.scatter(x[abaixo], y[abaixo], color="#D32F2F", s=60, marker="v", label="Abaixo do LIC")
+        ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70)
+        ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70)
 
-    ax.set_title("Carta de Controle – Custo Diário (R$)")
+    ax.set_title(titulo)
+    ax.set_ylabel(ylabel)
     ax.set_xlabel("Data")
-    ax.set_ylabel("Custo Diário (R$)")
-    ax.grid(True, axis="y", alpha=0.25)
-    ax.legend(loc="best")
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend()
 
+    # Sem 'key' aqui para evitar TypeError
     st.pyplot(fig)
+
+# ===========================================================
+#                       MÉTRICAS
+# ===========================================================
+# Custo do dia (último)
+ultimo = df_day[PARAM].iloc[-1]
+
+# Custo semanal (soma) da semana ISO mais recente
+iso_week = dfq[COL_DATA].dt.isocalendar()
+dfq["__sem__"]   = iso_week.week.astype(int)
+dfq["__anoiso__"]= iso_week.year.astype(int)
+
+ult_sem = dfq["__sem__"].iloc[-1]
+ult_ano = dfq["__anoiso__"].iloc[-1]
+custo_semana = dfq[(dfq["__sem__"]==ult_sem)&(dfq["__anoiso__"]==ult_ano)][PARAM].sum()
+
+# Custo mensal (soma) do mês/ano mais recente
+dfq["__mes__"] = dfq[COL_DATA].dt.month
+dfq["__ano__"] = dfq[COL_DATA].dt.year
+ult_mes = dfq["__mes__"].iloc[-1]
+ult_ano2 = dfq["__ano__"].iloc[-1]
+custo_mes = dfq[(dfq["__mes__"]==ult_mes)&(dfq["__ano__"]==ult_ano2)][PARAM].sum()
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+m2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+m3.metric("Custo do Mês",    f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+# ===========================================================
+#                 DESENHAR 3 CARTAS
+# ===========================================================
+st.subheader("📅 Carta Diária")
+if df_day.empty:
+    st.info("Sem dados diários.")
+else:
+    desenhar_carta(df_day[COL_DATA], df_day[PARAM], "Custo Diário (R$)", "Custo Diário (R$)")
+
+st.subheader("🗓️ Carta Semanal (ISO)")
+if df_week.empty:
+    st.info("Sem dados semanais.")
+else:
+    desenhar_carta(df_week["Data"], df_week[PARAM], "Custo Semanal (R$)", "Custo Semanal (R$)")
+
+st.subheader("📆 Carta Mensal")
+if df_month.empty:
+    st.info("Sem dados mensais.")
+else:
+    desenhar_carta(df_month["Data"], df_month[PARAM], "Custo Mensal (R$)", "Custo Mensal (R$)")
