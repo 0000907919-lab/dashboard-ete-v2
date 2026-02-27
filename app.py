@@ -425,3 +425,149 @@ def main():
 
 if __name__ == "__main__":
     main()
+# =========================================================
+# CARTAS DE CONTROLE – MULTI QUÍMICOS (FUNCIONANDO)
+# =========================================================
+
+st.markdown("---")
+st.header("🔴 Cartas de Controle — Custos dos Químicos")
+
+# URL da aba Seleção Químicos
+GID_QUIM = "668859455"
+URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
+
+# 1) Lê a planilha inteira SEM cabeçalho (porque a 1ª linha é azul)
+dfraw = pd.read_csv(URL_QUIM, header=None, dtype=str)
+
+# Linha azul (nomes dos produtos)
+linha_nomes = dfraw.iloc[0].tolist()
+
+# Linha de rótulos (DATA, CONSUMO DIÁRIO, META, CUSTO $$ etc.)
+header_row = dfraw.iloc[1].tolist()
+
+# Dados começam na linha 2
+dfq = dfraw.iloc[2:].copy()
+dfq.columns = header_row
+dfq = dfq.reset_index(drop=True)
+
+# Identifica colunas
+colunas = [str(c).strip() for c in dfq.columns]
+indices_data  = [i for i, c in enumerate(colunas) if c.upper() == "DATA"]
+indices_custo = [i for i, c in enumerate(colunas) if c.upper() == "CUSTO $$"]
+
+# Debug opcional
+with st.expander("Debug (químicos)"):
+    st.write("Cabeçalhos lidos:", colunas)
+    st.write("Índices DATA:", indices_data)
+    st.write("Índices CUSTO $$:", indices_custo)
+    st.dataframe(dfq.head())
+
+# Função para descobrir nome do químico
+def _nome_quimico(idx_data_col):
+    # tenta mesma coluna
+    try:
+        nm = (linha_nomes[idx_data_col] or "").strip()
+        if nm:
+            return nm
+    except:
+        pass
+    # varre pra esquerda (células mescladas)
+    j = idx_data_col - 1
+    while j >= 0:
+        val = (linha_nomes[j] or "").strip()
+        if val:
+            return val
+        j -= 1
+    # fallback
+    return f"Químico col {idx_data_col}"
+
+# Prepara bloco por químico
+dfs_quim = []
+
+def preparar_dados_quimico(df, idx_data, idx_custo, nome):
+    bloco = df[[df.columns[idx_data], df.columns[idx_custo]]].copy()
+    bloco.columns = ["DATA", "CUSTO"]
+
+    bloco["DATA"] = pd.to_datetime(bloco["DATA"], dayfirst=True, errors="coerce")
+
+    bloco["CUSTO"] = (
+        bloco["CUSTO"].astype(str)
+        .str.replace("R$", "")
+        .str.replace(" ", "")
+        .str.replace(".", "")
+        .str.replace(",", ".", regex=False)
+    )
+    bloco["CUSTO"] = pd.to_numeric(bloco["CUSTO"], errors="coerce")
+
+    bloco = bloco.dropna(subset=["DATA", "CUSTO"])
+    bloco["Quimico"] = nome
+    return bloco
+
+# Monta blocos
+for idx_data in indices_data:
+    candidatos = [i for i in indices_custo if i > idx_data]
+    if not candidatos:
+        continue
+    idx_custo = candidatos[0]
+    nome = _nome_quimico(idx_data)
+    dfs_quim.append(preparar_dados_quimico(dfq, idx_data, idx_custo, nome))
+
+if not dfs_quim:
+    st.error("Nenhum químico detectado. Verifique se a aba tem DATA e CUSTO $$.")
+    st.stop()
+
+df_final = pd.concat(dfs_quim, ignore_index=True)
+
+# Função da Carta de Controle (matplotlib)
+def desenhar_carta(x, y, titulo, ylabel):
+    y = pd.Series(y).astype(float)
+    media = y.mean()
+    desvio = y.std(ddof=1) if len(y) > 1 else 0.0
+    LSC = media + 3*desvio
+    LIC = media - 3*desvio
+
+    fig, ax = plt.subplots(figsize=(12,5))
+    ax.plot(x, y, marker="o", color="#1565C0")
+    ax.axhline(media, linestyle="--", color="blue", label="Média")
+    if desvio > 0:
+        ax.axhline(LSC, linestyle="--", color="red", label="LSC (+3σ)")
+        ax.axhline(LIC, linestyle="--", color="red", label="LIC (−3σ)")
+
+    ax.set_title(titulo)
+    ax.set_xlabel("Data")
+    ax.set_ylabel(ylabel)
+    ax.grid(True)
+    ax.legend()
+    st.pyplot(fig)
+
+# CARTAS
+for quim in df_final["Quimico"].unique():
+    bloco = df_final[df_final["Quimico"] == quim]
+    st.subheader(f"📌 {quim}")
+
+    # Diário
+    st.markdown("### 📅 Diário")
+    desenhar_carta(bloco["DATA"], bloco["CUSTO"],
+                   f"Custo Diário — {quim}", "Custo (R$)")
+
+    # Semanal ISO
+    df_week = (
+        bloco.assign(semana=bloco["DATA"].dt.to_period("W-MON"))
+             .groupby("semana", as_index=False)["CUSTO"].sum()
+    )
+    df_week["Data"] = df_week["semana"].dt.start_time
+
+    st.markdown("### 🗓️ Semanal (ISO)")
+    desenhar_carta(df_week["Data"], df_week["CUSTO"],
+                   f"Custo Semanal — {quim}", "Custo (R$)")
+
+    # Mensal
+    df_month = (
+        bloco.assign(mes=bloco["DATA"].dt.to_period("M"))
+             .groupby("mes", as_index=False)["CUSTO"].sum()
+    )
+    df_month["Data"] = df_month["mes"].dt.to_timestamp()
+
+    st.markdown("### 📆 Mensal")
+    desenhar_carta(df_month["Data"], df_month["CUSTO"],
+                   f"Custo Mensal — {quim}", "Custo (R$)")
