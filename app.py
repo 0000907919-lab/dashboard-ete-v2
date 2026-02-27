@@ -355,10 +355,6 @@ def render_dqo():
     _render_tiles_from_cols("DQO", cols, n_cols=4, interpret_numeric_as_status=False)
 
 def render_estados():
-    if not dfs_quim:
-    st.error("Nenhum químico detectado.")
-    cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
-def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
     if not cols:
         return
@@ -385,7 +381,7 @@ def render_quimicos():
 
     # Exibir a tabela de químicos (última linha com dados)
     df_qmcs_last = df_qmcs.tail(1).copy()
-    # Ajustar colunas para mostrar somente nomes sem acento em título
+    # Ajustar colunas para mostrar somente nomes com capitalização normalizada
     df_qmcs_last.columns = [col.title() for col in df_qmcs_last.columns]
 
     st.dataframe(df_qmcs_last.T.rename(columns={df_qmcs_last.index[-1]: "Valor"}))
@@ -426,6 +422,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 # =========================================================
 # CARTAS DE CONTROLE – MULTI QUÍMICOS (FUNCIONANDO)
 # =========================================================
@@ -469,7 +466,7 @@ dfq.columns = header_unique
 
 # Remove colunas duplicadas (por segurança extra) e reseta índice
 dfq = dfq.loc[:, ~pd.Index(dfq.columns).duplicated()].reset_index(drop=True)
-``
+
 # Identifica colunas
 colunas = [str(c).strip() for c in dfq.columns]
 indices_data  = [i for i, c in enumerate(colunas) if c.upper() == "DATA"]
