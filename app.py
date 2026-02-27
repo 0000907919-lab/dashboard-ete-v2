@@ -356,7 +356,6 @@ def render_dqo():
 
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
-    if not
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
     if not cols:
