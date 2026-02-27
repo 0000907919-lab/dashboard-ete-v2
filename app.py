@@ -11,21 +11,12 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title="Dashboard Operacional ETE", layout="wide")
  
 # =========================
-# GOOGLE SHEETS – DUAS ABAS
+# GOOGLE SHEETS
 # =========================
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
-
-# --- ABA 1: Operacional (Dashboard)
-GID_FORM = "1283870792"
-CSV_URL_FORM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_FORM}"
-df = pd.read_csv(CSV_URL_FORM)
-df.columns = [str(c).strip() for c in df.columns]
-
-# --- ABA 2: Controle de Químicos (Carta)
-GID_QUIM = "668859455"
-CSV_URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
-df_quim = pd.read_csv(CSV_URL_QUIM)
-df_quim.columns = [str(c).strip() for c in df_quim.columns]
+GID = "1283870792"
+CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
+ 
 # -------------------------
 # Carrega a planilha
 # -------------------------
@@ -384,6 +375,9 @@ render_tiles_split("Sopradores", KW_SOPRADOR)
 render_outros_niveis()
 render_vazoes()
 render_ph()
+render_sst()
+render_dqo()
+render_estados()
 # ============================================================
 #                 CARTA DE CONTROLE (RODAPÉ)
 #                   Custo Diário (R$)
