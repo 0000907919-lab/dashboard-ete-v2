@@ -378,8 +378,8 @@ st.header("🔴 Cartas de Controle — Custo (R$)")
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
-# ---- CONFIG: GID da aba de gastos (da sua imagem) ----
-GID_GASTOS = "668859455"  # você confirmou esse GID na captura
+# ---- CONFIG: GID da aba de gastos (o da sua captura) ----
+GID_GASTOS = "668859455"
 URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
 
 # ------------------------------------------------------------
@@ -396,7 +396,7 @@ def _strip_acc_lower(s: str) -> str:
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.lower().strip()
 
-def _find_header_row(df_txt: pd.DataFrame, max_scan: int = 60) -> int | None:
+def _find_header_row(df_txt: pd.DataFrame, max_scan: int = 80) -> int | None:
     """
     Acha a linha do cabeçalho: deve conter 'data' e também algum de
     {'custo','custos','gasto','gastos','valor','$'}.
@@ -425,7 +425,7 @@ def _parse_currency_br(series: pd.Series) -> pd.Series:
 # ------------------------------------------------------------
 # 3) DETECTAR LINHA DE CABEÇALHO E REDEFINIR COLUNAS
 # ------------------------------------------------------------
-hdr = _find_header_row(df_raw, max_scan=60)
+hdr = _find_header_row(df_raw, max_scan=80)
 if hdr is None:
     st.error("❌ Não achei a linha de cabeçalho com DATA e CUSTOS na aba informada.")
     st.stop()
@@ -434,27 +434,25 @@ header_vals = [str(x).strip() for x in df_raw.iloc[hdr].tolist()]
 dfq = df_raw.iloc[hdr+1:].copy()
 dfq.columns = header_vals
 
-# remove colunas de header vazias (nome em branco)
+# remove colunas com nome vazio
 dfq = dfq.loc[:, [c.strip() != "" for c in dfq.columns]]
 
 # ------------------------------------------------------------
 # 4) ESCOLHER O PAR (DATA, CUSTO) DO MESMO BLOCO
 #    -> pega CUSTO e escolhe a DATA mais próxima à esquerda
+#    (usa ÍNDICE de coluna para evitar nomes duplicados)
 # ------------------------------------------------------------
 norm_cols = [_strip_acc_lower(c) for c in dfq.columns]
 cost_idx_candidates = [i for i, nc in enumerate(norm_cols)
                        if ("custo" in nc or "custos" in nc or "gasto" in nc or "gastos" in nc or "valor" in nc or "$" in nc)]
-
 if not cost_idx_candidates:
     st.error("❌ Não encontrei nenhuma coluna de CUSTO/GASTO/VALOR.")
     st.write("Colunas disponíveis:", list(dfq.columns))
     st.stop()
 
-# usa o primeiro custo encontrado (bloco do PAC tem 'CUSTOS $$')
-cost_idx = cost_idx_candidates[0]
-COL_CUSTO = dfq.columns[cost_idx]
+cost_idx = cost_idx_candidates[0]         # primeiro bloco de custos (PAC)
+orig_cost_name = dfq.columns[cost_idx]
 
-# procurar DATA mais próxima à esquerda do custo
 data_idx_candidates = [i for i, nc in enumerate(norm_cols) if "data" in nc]
 if not data_idx_candidates:
     st.error("❌ Não encontrei nenhuma coluna de DATA.")
@@ -463,25 +461,31 @@ if not data_idx_candidates:
 
 left_data_idx = [i for i in data_idx_candidates if i <= cost_idx]
 if left_data_idx:
-    data_idx = max(left_data_idx)  # a DATA mais próxima à esquerda do CUSTO
+    data_idx = max(left_data_idx)         # DATA mais próxima à esquerda do CUSTO
 else:
-    # fallback: a DATA mais próxima em termos de distância
     data_idx = min(data_idx_candidates, key=lambda i: abs(i - cost_idx))
 
-COL_DATA = dfq.columns[data_idx]
+orig_data_name = dfq.columns[data_idx]
 
 # ------------------------------------------------------------
-# 5) CONVERTER TIPOS (DATA e MOEDA)
+# 5) CRIAR CÓPIAS COM NOMES ÚNICOS (evita 'duplicate keys')
+#    -> seleciona por POSIÇÃO (iloc), não por NOME
 # ------------------------------------------------------------
-dfq[COL_DATA]  = pd.to_datetime(dfq[COL_DATA].astype(str), errors="coerce", dayfirst=True)
-dfq[COL_CUSTO] = _parse_currency_br(dfq[COL_CUSTO])
+dfq = dfq.reset_index(drop=True).copy()
+dfq["DATA_SEL"]  = pd.to_datetime(dfq.iloc[:, data_idx].astype(str), errors="coerce", dayfirst=True)
+dfq["CUSTO_SEL"] = _parse_currency_br(dfq.iloc[:, cost_idx])
+
+# usar os nomes únicos a partir daqui
+COL_DATA  = "DATA_SEL"
+COL_CUSTO = "CUSTO_SEL"
 
 # limpar linhas inválidas e ordenar
 dfq = dfq.dropna(subset=[COL_DATA, COL_CUSTO]).sort_values(COL_DATA)
 
 with st.expander("🔍 Debug (Carta de Custos)"):
     st.write(f"Linha de cabeçalho detectada: {hdr}")
-    st.write("Coluna de Data:", COL_DATA, " | Coluna de Custo:", COL_CUSTO)
+    st.write("Coluna original de Data:", orig_data_name, " | índice:", data_idx)
+    st.write("Coluna original de Custo:", orig_cost_name, " | índice:", cost_idx)
     st.dataframe(dfq[[COL_DATA, COL_CUSTO]].head())
 
 if dfq.empty:
