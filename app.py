@@ -501,83 +501,89 @@ with colD:
     if nok_vn: st.write(f"NOK: {_fmt(nok_vn)}")
     if out_vn: st.caption("Outros: " + ", ".join(out_vn))
     st.caption(f"Ativas: {len(ok_vn)} de {len(v_nitr)}")
-
 # =========================================================
-# CARTAS DE CONTROLE – MULTI QUÍMICOS AUTOMÁTICO
+# CARTAS DE CONTROLE – MULTI QUÍMICOS (CORRIGIDO)
 # =========================================================
 
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custos dos Químicos")
 
-# Aba de dados dos químicos (Seleção Químicos)
+# Aba verdadeira dos químicos ("Seleção Químicos")
 GID_QUIM = "668859455"
 URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
 
 dfq = pd.read_csv(URL_QUIM)
 dfq.columns = [str(c).strip() for c in dfq.columns]
 
-# ---------------------------
-# Detecta blocos DATA + CUSTO
-# ---------------------------
+# ------------------------------------------------------------
+# DETECÇÃO EXATA BASEADA NA SUA PLANILHA (sheet_13 real)
+# ------------------------------------------------------------
+
 colunas = dfq.columns.tolist()
-indices_data = [i for i, c in enumerate(colunas) if "data" in c.lower()]
-indices_custo = [i for i, c in enumerate(colunas) if "custo" in c.lower()]
+
+# As colunas "DATA" aparecem literalmente como "DATA"
+indices_data = [i for i, c in enumerate(colunas) if c.strip().upper() == "DATA"]
+
+# A coluna de custo correta é sempre "CUSTO $$" (em maiúsculo)
+indices_custo = [i for i, c in enumerate(colunas) if c.strip() == "CUSTO $$"]
+
+dfs_quim = []
 
 def preparar_dados_quimico(df, idx_data, idx_custo, nome_quimico):
     data_col = df.columns[idx_data]
     custo_col = df.columns[idx_custo]
 
     df_local = df[[data_col, custo_col]].copy()
-    df_local = df_local.rename(columns={data_col: "DATA", custo_col: "CUSTO"})
+    df_local.columns = ["DATA", "CUSTO"]
 
     df_local["DATA"] = pd.to_datetime(df_local["DATA"], errors="coerce", dayfirst=True)
 
     df_local["CUSTO"] = (
         df_local["CUSTO"]
-        .astype(str)
-        .str.replace("R$", "", regex=False)
-        .str.replace(" ", "", regex=False)
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
+            .astype(str)
+            .str.replace("R$", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.replace(".", "", regex=False)
+            .str.replace(",", ".", regex=False)
     )
-
     df_local["CUSTO"] = pd.to_numeric(df_local["CUSTO"], errors="coerce")
+
     df_local = df_local.dropna(subset=["DATA", "CUSTO"]).sort_values("DATA")
     df_local["Quimico"] = nome_quimico
+
     return df_local
 
-dfs_quim = []
-
+# percorre cada coluna DATA encontrada
 for idx_data in indices_data:
-    idx_custo = None
-    for idx in indices_custo:
-        if idx > idx_data:
-            idx_custo = idx
-            break
-    if idx_custo is None:
+
+    # encontra o próximo "CUSTO $$" após o DATA
+    custos_validos = [i for i in indices_custo if i > idx_data]
+    if not custos_validos:
         continue
 
-    nome_col = colunas[idx_custo]
-    nome = (
-        nome_col.replace("CUSTO $$", "")
-                .replace("Custo $$", "")
-                .replace("CUSTO$", "")
-                .strip(" -:_.")
-    )
-    if not nome:
-        nome = f"Químico {len(dfs_quim)+1}"
+    idx_custo = custos_validos[0]
 
-    dfs_quim.append(preparar_dados_quimico(dfq, idx_data, idx_custo, nome))
+    # Nome do químico = cabeçalho do bloco (linha azul na sua planilha)
+    # Ex: "PAC (LITROS) – código 50852846"
+    nome_quimico = colunas[idx_data - 1] if idx_data > 0 else f"Químico {len(dfs_quim)+1}"
 
+    # Se por algum motivo vier vazio, cria nome automático
+    if not nome_quimico or nome_quimico.upper() == "DATA":
+        nome_quimico = f"Químico {len(dfs_quim)+1}"
+
+    dfs_quim.append(preparar_dados_quimico(dfq, idx_data, idx_custo, nome_quimico))
+
+# valida
 if not dfs_quim:
-    st.error("❌ Nenhum bloco DATA + CUSTO $$ encontrado na aba de químicos.")
+    st.error("Nenhum químico detectado. Verifique a aba Seleção Químicos.")
     st.stop()
 
 df_final = pd.concat(dfs_quim, ignore_index=True)
 
-# ---------------------------
-# Função para carta de controle
-# ---------------------------
+# ------------------------------------------------------------
+# Função da Carta de Controle
+# ------------------------------------------------------------
+
 def desenhar_carta(x, y, titulo, ylabel):
     y = pd.Series(y).astype(float)
     n = len(y)
@@ -587,6 +593,7 @@ def desenhar_carta(x, y, titulo, ylabel):
     LIC = media - 3 * desvio
 
     fig, ax = plt.subplots(figsize=(12, 5))
+
     ax.plot(x, y, marker="o", color="#1565C0")
     ax.axhline(media, color="blue", linestyle="--", label="Média")
 
@@ -596,6 +603,7 @@ def desenhar_carta(x, y, titulo, ylabel):
 
         acima = y > LSC
         abaixo = y < LIC
+
         ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70)
         ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70)
 
@@ -607,10 +615,12 @@ def desenhar_carta(x, y, titulo, ylabel):
 
     st.pyplot(fig)
 
-# ---------------------------
-# Cartas para cada Químico
-# ---------------------------
+# ------------------------------------------------------------
+# Gera as cartas para cada químico
+# ------------------------------------------------------------
+
 for quim in df_final["Quimico"].unique():
+
     bloco = df_final[df_final["Quimico"] == quim]
 
     st.subheader(f"📌 {quim}")
@@ -622,7 +632,8 @@ for quim in df_final["Quimico"].unique():
     # Semanal
     df_week = (
         bloco.assign(semana=bloco["DATA"].dt.to_period("W-MON"))
-             .groupby("semana", as_index=False)["CUSTO"].sum()
+             .groupby("semana", as_index=False)["CUSTO"]
+             .sum()
     )
     df_week["Data"] = df_week["semana"].dt.start_time
 
@@ -632,7 +643,8 @@ for quim in df_final["Quimico"].unique():
     # Mensal
     df_month = (
         bloco.assign(mes=bloco["DATA"].dt.to_period("M"))
-             .groupby("mes", as_index=False)["CUSTO"].sum()
+             .groupby("mes", as_index=False)["CUSTO"]
+             .sum()
     )
     df_month["Data"] = df_month["mes"].dt.to_timestamp()
 
