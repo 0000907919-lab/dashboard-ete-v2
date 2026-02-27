@@ -375,12 +375,15 @@ render_estados()
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custo (R$)")
 
+# ---- CONFIG: GID da aba (pode alterar pela sidebar) ----
+with st.sidebar:
+    gid_input = st.text_input("GID da aba de gastos", value="668859455")
+GID_GASTOS = gid_input.strip() or "668859455"
+URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
+
+# Botão de recarregar (útil no Cloud)
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
-
-# ---- CONFIG: GID da aba de gastos (o da sua captura) ----
-GID_GASTOS = "668859455"
-URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
 
 # ------------------------------------------------------------
 # 1) CARREGAR CSV COMO TEXTO (SEM HEADER) PARA NÃO PERDER LINHAS
@@ -398,7 +401,7 @@ def _strip_acc_lower(s: str) -> str:
 
 def _find_header_row(df_txt: pd.DataFrame, max_scan: int = 80) -> int | None:
     """
-    Acha a linha do cabeçalho: deve conter 'data' e também algum de
+    Encontra a linha do cabeçalho: deve conter 'data' E algum de
     {'custo','custos','gasto','gastos','valor','$'}.
     """
     kws_custo = ["custo", "custos", "gasto", "gastos", "valor", "$"]
@@ -406,7 +409,7 @@ def _find_header_row(df_txt: pd.DataFrame, max_scan: int = 80) -> int | None:
     for i in range(n):
         row_vals = [_strip_acc_lower(x) for x in df_txt.iloc[i].tolist()]
         has_data  = any("data" in v for v in row_vals)
-        has_custo = any(any(k in v for k in kws_custo) for v in row_vals)
+        has_custo = any(any(k in v for k in row_vals) for k in kws_custo)
         if has_data and has_custo:
             return i
     return None
@@ -431,16 +434,16 @@ if hdr is None:
     st.stop()
 
 header_vals = [str(x).strip() for x in df_raw.iloc[hdr].tolist()]
-dfq = df_raw.iloc[hdr+1:].copy()
+dfq = df_raw.iloc[hdr + 1:].copy()
 dfq.columns = header_vals
 
-# remove colunas com nome vazio
+# remove colunas cujo nome está vazio (header em branco)
 dfq = dfq.loc[:, [c.strip() != "" for c in dfq.columns]]
 
 # ------------------------------------------------------------
 # 4) ESCOLHER O PAR (DATA, CUSTO) DO MESMO BLOCO
-#    -> pega CUSTO e escolhe a DATA mais próxima à esquerda
-#    (usa ÍNDICE de coluna para evitar nomes duplicados)
+#    -> pega CUSTOS e escolhe a DATA mais próxima à esquerda
+#    (por ÍNDICE de coluna, evitando nomes duplicados como 'DATA')
 # ------------------------------------------------------------
 norm_cols = [_strip_acc_lower(c) for c in dfq.columns]
 cost_idx_candidates = [i for i, nc in enumerate(norm_cols)
@@ -450,7 +453,8 @@ if not cost_idx_candidates:
     st.write("Colunas disponíveis:", list(dfq.columns))
     st.stop()
 
-cost_idx = cost_idx_candidates[0]         # primeiro bloco de custos (PAC)
+# Usamos o primeiro custo encontrado (cost mais à esquerda = bloco do PAC)
+cost_idx = cost_idx_candidates[0]
 orig_cost_name = dfq.columns[cost_idx]
 
 data_idx_candidates = [i for i, nc in enumerate(norm_cols) if "data" in nc]
@@ -459,9 +463,10 @@ if not data_idx_candidates:
     st.write("Colunas disponíveis:", list(dfq.columns))
     st.stop()
 
+# DATA mais próxima à esquerda do custo; se não houver, a mais próxima
 left_data_idx = [i for i in data_idx_candidates if i <= cost_idx]
 if left_data_idx:
-    data_idx = max(left_data_idx)         # DATA mais próxima à esquerda do CUSTO
+    data_idx = max(left_data_idx)
 else:
     data_idx = min(data_idx_candidates, key=lambda i: abs(i - cost_idx))
 
@@ -469,17 +474,15 @@ orig_data_name = dfq.columns[data_idx]
 
 # ------------------------------------------------------------
 # 5) CRIAR CÓPIAS COM NOMES ÚNICOS (evita 'duplicate keys')
-#    -> seleciona por POSIÇÃO (iloc), não por NOME
 # ------------------------------------------------------------
 dfq = dfq.reset_index(drop=True).copy()
 dfq["DATA_SEL"]  = pd.to_datetime(dfq.iloc[:, data_idx].astype(str), errors="coerce", dayfirst=True)
 dfq["CUSTO_SEL"] = _parse_currency_br(dfq.iloc[:, cost_idx])
 
-# usar os nomes únicos a partir daqui
 COL_DATA  = "DATA_SEL"
 COL_CUSTO = "CUSTO_SEL"
 
-# limpar linhas inválidas e ordenar
+# limpar linhas inválidas e ordenar por data
 dfq = dfq.dropna(subset=[COL_DATA, COL_CUSTO]).sort_values(COL_DATA)
 
 with st.expander("🔍 Debug (Carta de Custos)"):
@@ -510,17 +513,63 @@ df_month = (
 df_month["Data"] = df_month["mes"].dt.to_timestamp()
 
 # ------------------------------------------------------------
-# 7) FUNÇÃO DA CARTA (X-barra)
+# 7) MÉTRICAS (usa último valor válido — evita mostrar 0,00)
 # ------------------------------------------------------------
-def desenhar_carta(x, y, titulo, ylabel):
+def _ultimo_valido_positivo(ser: pd.Series) -> float:
+    s = pd.to_numeric(ser, errors="coerce")
+    s = s[~s.isna()]
+    if s.empty:
+        return 0.0
+    nz = s[s != 0]
+    if not nz.empty:
+        return float(nz.iloc[-1])
+    return float(s.iloc[-1])  # se só houver zeros
+
+# Dia (último dia com custo > 0; se não houver, usa o último disponível)
+ultimo = _ultimo_valido_positivo(df_day[COL_CUSTO])
+
+# Referência (linha) para semana/mês: última com custo > 0; se não houver, última linha
+mask_nz = dfq[COL_CUSTO].fillna(0) != 0
+idx_ref = mask_nz[mask_nz].index[-1] if mask_nz.any() else dfq.index[-1]
+
+iso_week = dfq[COL_DATA].dt.isocalendar()
+dfq["__sem__"]    = iso_week.week.astype(int)
+dfq["__anoiso__"] = iso_week.year.astype(int)
+ult_sem = int(dfq.loc[idx_ref, "__sem__"])
+ult_ano = int(dfq.loc[idx_ref, "__anoiso__"])
+custo_semana = dfq[(dfq["__sem__"] == ult_sem) & (dfq["__anoiso__"] == ult_ano)][COL_CUSTO].sum()
+
+dfq["__mes__"] = dfq[COL_DATA].dt.month
+dfq["__ano__"] = dfq[COL_DATA].dt.year
+ult_mes  = int(dfq.loc[idx_ref, "__mes__"])
+ult_ano2 = int(dfq.loc[idx_ref, "__ano__"])
+custo_mes = dfq[(dfq["__mes__"] == ult_mes) & (dfq["__ano__"] == ult_ano2)][COL_CUSTO].sum()
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+m2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+m3.metric("Custo do Mês",    f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+# ------------------------------------------------------------
+# 8) FUNÇÃO DA CARTA (X-barra) COM RÓTULOS E EIXO EM R$
+# ------------------------------------------------------------
+from matplotlib.ticker import FuncFormatter
+
+def _fmt_brl(v, pos=None):
+    try:
+        return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return v
+
+def desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
     y = pd.Series(y).astype(float)
     media = y.mean()
     desvio = y.std(ddof=1) if len(y) > 1 else 0.0
     LSC = media + 3*desvio
     LIC = media - 3*desvio
 
-    fig, ax = plt.subplots(figsize=(12, 4.5))
-    ax.plot(x, y, marker="o", color="#1565C0")
+    fig, ax = plt.subplots(figsize=(12, 4.8))
+    ax.plot(x, y, marker="o", color="#1565C0", label="Série")
     ax.axhline(media, color="blue", linestyle="--", label="Média")
 
     if desvio > 0:
@@ -531,6 +580,23 @@ def desenhar_carta(x, y, titulo, ylabel):
         ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70, zorder=3)
         ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70, zorder=3)
 
+    # Formatar eixo Y em moeda BR
+    ax.yaxis.set_major_formatter(FuncFormatter(_fmt_brl))
+
+    # Rótulos de dados
+    if mostrar_rotulos:
+        for xi, yi in zip(x, y):
+            if pd.notna(yi):
+                ax.annotate(
+                    ("R$ " + f"{yi:,.0f}").replace(",", "X").replace(".", ",").replace("X", "."),
+                    (xi, yi),
+                    textcoords="offset points",
+                    xytext=(0, 6),
+                    ha="center",
+                    fontsize=8,
+                    color="#1565C0",
+                )
+
     ax.set_title(titulo)
     ax.set_ylabel(ylabel)
     ax.set_xlabel("Data")
@@ -539,36 +605,15 @@ def desenhar_carta(x, y, titulo, ylabel):
     st.pyplot(fig)
 
 # ------------------------------------------------------------
-# 8) MÉTRICAS (dia/semana/mês mais recentes)
+# 9) CARTAS (com toggle de rótulos)
 # ------------------------------------------------------------
-ultimo = df_day[COL_CUSTO].iloc[-1]
+mostrar_rotulos = st.checkbox("Mostrar rótulos de dados nas cartas", value=True)
 
-iso_week = dfq[COL_DATA].dt.isocalendar()
-dfq["__sem__"]    = iso_week.week.astype(int)
-dfq["__anoiso__"] = iso_week.year.astype(int)
-ult_sem = dfq["__sem__"].iloc[-1]
-ult_ano = dfq["__anoiso__"].iloc[-1]
-custo_semana = dfq[(dfq["__sem__"] == ult_sem) & (dfq["__anoiso__"] == ult_ano)][COL_CUSTO].sum()
-
-dfq["__mes__"] = dfq[COL_DATA].dt.month
-dfq["__ano__"] = dfq[COL_DATA].dt.year
-ult_mes  = dfq["__mes__"].iloc[-1]
-ult_ano2 = dfq["__ano__"].iloc[-1]
-custo_mes = dfq[(dfq["__mes__"] == ult_mes) & (dfq["__ano__"] == ult_ano2)][COL_CUSTO].sum()
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-c2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-c3.metric("Custo do Mês",    f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
-# ------------------------------------------------------------
-# 9) CARTAS
-# ------------------------------------------------------------
 st.subheader("📅 Carta Diária")
-desenhar_carta(df_day[COL_DATA], df_day[COL_CUSTO], "Custo Diário (R$)", "R$")
+desenhar_carta(df_day[COL_DATA], df_day[COL_CUSTO], "Custo Diário (R$)", "R$", mostrar_rotulos=mostrar_rotulos)
 
 st.subheader("🗓️ Carta Semanal (ISO)")
-desenhar_carta(df_week["Data"], df_week[COL_CUSTO], "Custo Semanal (R$)", "R$")
+desenhar_carta(df_week["Data"], df_week[COL_CUSTO], "Custo Semanal (R$)", "R$", mostrar_rotulos=mostrar_rotulos)
 
 st.subheader("📆 Carta Mensal")
-desenhar_carta(df_month["Data"], df_month[COL_CUSTO], "Custo Mensal (R$)", "R$")
+desenhar_carta(df_month["Data"], df_month[COL_CUSTO], "Custo Mensal (R$)", "R$", mostrar_rotulos=mostrar_rotulos)
