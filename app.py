@@ -508,19 +508,12 @@ with colD:
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custos dos Químicos")
 
-# ---- LEITURA CORRETA: linha 2 é cabeçalho, linha 1 é nome dos químicos ----
-dfraw = pd.read_csv(URL_QUIM, header=None)
+# ---- DEFINA ISTO AQUI: (ANTES DA LEITURA) ----
+GID_QUIM = "668859455"
+URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
 
-linha_nomes = dfraw.iloc[0].tolist()      # linha azul (títulos dos químicos)
-dfq = dfraw.iloc[1:].copy()               # dados começam na linha 2
-dfq.columns = dfraw.iloc[1].tolist()      # cabeçalhos reais (DATA, CUSTO $$ etc.)
-
-dfq = dfq.reset_index(drop=True)
-
-# ---- Identifica DATA e CUSTO $$ ----
-colunas = dfq.columns.tolist()
-
-indices_data = [i for i, c in enumerate(colunas) if str(c).strip().upper() == "DATA"]
+# ---- AGORA SIM PODE LER ----
+dfraw = pd.read_csv(URL_QUIM, header=None) = [i for i, c in enumerate(colunas) if str(c).strip().upper() == "DATA"]
 indices_custo = [i for i, c in enumerate(colunas) if str(c).strip().upper() == "CUSTO $$"]
 
 dfs_quim = []
