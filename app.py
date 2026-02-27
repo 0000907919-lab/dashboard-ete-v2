@@ -370,52 +370,68 @@ render_sst()
 render_dqo()
 render_estados()
 # ============================================================
-#        CARTAS DE CONTROLE — CUSTO (R$)  [UMA POR ITEM]
+#        CARTAS DE CONTROLE — CUSTOS (R$)  [MULTI-ITEM]
+#        • Timeout + cache no download
+#        • Detecção de cabeçalho robusta
+#        • Uma aba por item (PAC, Ácido, etc.)
+#        • Rótulos de dados + eixo em R$
+#        • Métricas com último valor válido (> 0)
+#        • Filtro anti-duplicados (ignora Média/Status/Meta)
 # ============================================================
+import io, requests
+from matplotlib.ticker import FuncFormatter
+
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custo (R$)")
 
-# ---- CONFIG: GID da aba (pode alterar pela sidebar) ----
+# ---- CONFIG: GID da aba (pode trocar na sidebar) ----
 with st.sidebar:
     gid_input = st.text_input("GID da aba de gastos", value="668859455")
-GID_GASTOS = gid_input.strip() or "668859455"
-URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
+CC_GID_GASTOS = gid_input.strip() or "668859455"
+CC_URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={CC_GID_GASTOS}"
 
-# Botão de recarregar
+# Botão de recarregar (útil no Cloud)
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
 # ------------------------------------------------------------
-# 1) CARREGAR CSV COMO TEXTO (SEM HEADER) PARA NÃO PERDER LINHAS
+# 1) LOADER com timeout + cache
 # ------------------------------------------------------------
-df_raw = pd.read_csv(URL_GASTOS, dtype=str, keep_default_na=False, header=None)
+@st.cache_data(ttl=900, show_spinner=False)
+def cc_baixar_csv_bruto(url: str, timeout: int = 20) -> pd.DataFrame:
+    """
+    Baixa o CSV via requests (com timeout) e entrega como DataFrame sem header.
+    Mantém tudo como texto para não perder linhas/títulos.
+    """
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    buf = io.StringIO(resp.text)
+    df_txt = pd.read_csv(buf, dtype=str, keep_default_na=False, header=None)
+    df_txt.columns = [str(c).strip() for c in df_txt.columns]
+    return df_txt
 
-# ------------------------------------------------------------
-# 2) AUXILIARES
-# ------------------------------------------------------------
-def _strip_acc_lower(s: str) -> str:
+def cc_strip_acc_lower(s: str) -> str:
     import unicodedata
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.lower().strip()
 
-def _find_header_row(df_txt: pd.DataFrame, max_scan: int = 80) -> int | None:
+def cc_find_header_row(df_txt: pd.DataFrame, max_scan: int = 120) -> int | None:
     """
-    Encontra a linha do cabeçalho: deve conter 'data' E algum de
+    Acha a linha do cabeçalho: deve conter 'data' E algum de
     {'custo','custos','gasto','gastos','valor','$'}.
-    (corrigido o NameError: usamos 'kw' e 'v' corretamente)
     """
     kws_custo = ["custo", "custos", "gasto", "gastos", "valor", "$"]
     n = min(len(df_txt), max_scan)
     for i in range(n):
-        row_vals = [_strip_acc_lower(x) for x in df_txt.iloc[i].tolist()]
+        row_vals = [cc_strip_acc_lower(x) for x in df_txt.iloc[i].tolist()]
         has_data  = any("data" in v for v in row_vals)
         has_custo = any(any(kw in v for v in row_vals) for kw in kws_custo)
         if has_data and has_custo:
             return i
     return None
 
-def _parse_currency_br(series: pd.Series) -> pd.Series:
+def cc_parse_currency_br(series: pd.Series) -> pd.Series:
     import re
     s = series.astype(str)
     s = s.str.replace("\u00A0", " ", regex=False)  # NBSP
@@ -426,17 +442,18 @@ def _parse_currency_br(series: pd.Series) -> pd.Series:
     s = s.apply(lambda x: re.sub(r"[^0-9.\-]", "", x))
     return pd.to_numeric(s, errors="coerce")
 
-def _guess_item_label(df_txt: pd.DataFrame, header_row: int, col_idx: int, fallback: str) -> str:
+def cc_guess_item_label(df_txt: pd.DataFrame, header_row: int, col_idx: int, fallback: str) -> str:
     """
-    Tenta descobrir o nome do item olhando a linha ANTERIOR ao cabeçalho
-    no MESMO bloco (ex.: 'PAC (LITROS) – código ...').
-    Se estiver vazio, busca à esquerda até achar algo. Cai no fallback se nada achar.
+    Nome do item olhando a linha ANTERIOR ao cabeçalho no mesmo bloco.
+    Se vazio, tenta à esquerda. Cai no fallback se nada achar.
     """
     label = ""
     if header_row - 1 >= 0:
-        label = str(df_txt.iat[header_row - 1, col_idx]).strip()
+        try:
+            label = str(df_txt.iat[header_row - 1, col_idx]).strip()
+        except Exception:
+            label = ""
         if not label:
-            # busca alguns passos à esquerda
             for j in range(col_idx - 1, max(-1, col_idx - 8), -1):
                 try:
                     v = str(df_txt.iat[header_row - 1, j]).strip()
@@ -447,74 +464,103 @@ def _guess_item_label(df_txt: pd.DataFrame, header_row: int, col_idx: int, fallb
                     break
     if not label:
         label = fallback
-    # enxuga o nome para ficar amigável
     label = label.replace("\n", " ").strip()
     if len(label) > 80:
         label = label[:77] + "..."
     return label
 
 # ------------------------------------------------------------
-# 3) DETECTAR LINHA DE CABEÇALHO E REDEFINIR COLUNAS
+# 2) Baixar CSV + parse do cabeçalho (com feedback)
 # ------------------------------------------------------------
-hdr = _find_header_row(df_raw, max_scan=80)
-if hdr is None:
-    st.error("❌ Não achei a linha de cabeçalho com DATA e CUSTOS na aba informada.")
+with st.status("Carregando dados das cartas...", expanded=True) as status:
+    try:
+        st.write("• Baixando CSV do Google Sheets…")
+        cc_df_raw = cc_baixar_csv_bruto(CC_URL_GASTOS, timeout=20)
+        st.write(f"• CSV bruto: {cc_df_raw.shape[0]} linhas × {cc_df_raw.shape[1]} colunas")
+
+        st.write("• Detectando linha de cabeçalho…")
+        cc_hdr = cc_find_header_row(cc_df_raw, max_scan=120)
+        if cc_hdr is None:
+            st.error("❌ Não achei a linha de cabeçalho com DATA e CUSTOS na aba informada.")
+            st.stop()
+
+        cc_header_vals = [str(x).strip() for x in cc_df_raw.iloc[cc_hdr].tolist()]
+        cc_df_all = cc_df_raw.iloc[cc_hdr + 1:].copy()
+        cc_df_all.columns = cc_header_vals
+        # remove colunas com nome vazio
+        cc_df_all = cc_df_all.loc[:, [c.strip() != "" for c in cc_df_all.columns]]
+
+        status.update(label="Dados carregados com sucesso ✅", state="complete")
+    except requests.exceptions.Timeout:
+        st.error("⏳ Timeout ao acessar o Google Sheets (20s). Tente novamente ou verifique sua conexão.")
+        st.stop()
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Falha ao baixar o CSV: {e}")
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ Erro inesperado ao preparar dados: {e}")
+        st.stop()
+
+# ------------------------------------------------------------
+# 3) Identificar todos os ITENS (pares DATA + CUSTO do mesmo bloco)
+#    • filtra columns de custo válidas (exclui média, status, meta etc.)
+#    • deduplica por rótulo do item
+# ------------------------------------------------------------
+cc_norm_cols = [cc_strip_acc_lower(c) for c in cc_df_all.columns]
+
+CC_KW_COST_INCLUDE = ["custo", "custos", "gasto", "gastos", "valor", "$"]
+CC_KW_COST_EXCLUDE = ["media", "média", "status", "automatic", "automatico", "automático", "meta"]
+
+def cc_is_valid_cost_header(nc: str) -> bool:
+    has_include = any(k in nc for k in CC_KW_COST_INCLUDE)
+    has_exclude = any(k in nc for k in CC_KW_COST_EXCLUDE)
+    return has_include and not has_exclude
+
+cc_cost_idx_list = [i for i, nc in enumerate(cc_norm_cols) if cc_is_valid_cost_header(nc)]
+cc_data_idx_list = [i for i, nc in enumerate(cc_norm_cols) if "data" in nc]
+
+if not cc_cost_idx_list:
+    st.error("❌ Não encontrei nenhuma coluna de CUSTO/GASTO/VALOR válida (excluídas: média, status, meta).")
+    st.write("Colunas disponíveis:", list(cc_df_all.columns))
     st.stop()
-
-header_vals = [str(x).strip() for x in df_raw.iloc[hdr].tolist()]
-df_all = df_raw.iloc[hdr + 1:].copy()
-df_all.columns = header_vals
-
-# remove colunas cujo nome está vazio (header em branco)
-df_all = df_all.loc[:, [c.strip() != "" for c in df_all.columns]]
-
-# ------------------------------------------------------------
-# 4) IDENTIFICAR TODOS OS ITENS (pares DATA + CUSTO do mesmo bloco)
-# ------------------------------------------------------------
-norm_cols = [_strip_acc_lower(c) for c in df_all.columns]
-
-# todos os custos/valores
-cost_idx_list = [i for i, nc in enumerate(norm_cols)
-                 if ("custo" in nc or "custos" in nc or "gasto" in nc or "gastos" in nc or "valor" in nc or "$" in nc)]
-
-# todas as datas
-data_idx_list = [i for i, nc in enumerate(norm_cols) if "data" in nc]
-
-if not cost_idx_list:
-    st.error("❌ Não encontrei nenhuma coluna de CUSTO/GASTO/VALOR.")
-    st.write("Colunas disponíveis:", list(df_all.columns))
-    st.stop()
-if not data_idx_list:
+if not cc_data_idx_list:
     st.error("❌ Não encontrei nenhuma coluna de DATA.")
-    st.write("Colunas disponíveis:", list(df_all.columns))
+    st.write("Colunas disponíveis:", list(cc_df_all.columns))
     st.stop()
 
-items = []  # lista de dicts: {label, df}
-for cost_idx in cost_idx_list:
-    cost_name = df_all.columns[cost_idx]
+cc_items = []
+cc_seen_labels = set()
 
-    # DATA mais próxima à esquerda; se não houver, a mais próxima (esquerda/direita)
-    left_data = [i for i in data_idx_list if i <= cost_idx]
+for cost_idx in cc_cost_idx_list:
+    cost_name = cc_df_all.columns[cost_idx]
+
+    # DATA mais próxima à esquerda; se não houver, a mais próxima absoluta
+    left_data = [i for i in cc_data_idx_list if i <= cost_idx]
     if left_data:
         data_idx = max(left_data)
     else:
-        data_idx = min(data_idx_list, key=lambda i: abs(i - cost_idx))
-    data_name = df_all.columns[data_idx]
+        data_idx = min(cc_data_idx_list, key=lambda i: abs(i - cost_idx))
+    data_name = cc_df_all.columns[data_idx]
 
-    # cria dataframe do item (seleção por POSIÇÃO evita 'duplicate keys')
+    # monta DF do item (seleção por POSIÇÃO evita 'duplicate keys')
     df_item = pd.DataFrame({
-        "DATA": pd.to_datetime(df_all.iloc[:, data_idx].astype(str), errors="coerce", dayfirst=True),
-        "CUSTO": _parse_currency_br(df_all.iloc[:, cost_idx]),
-    })
-    df_item = df_item.dropna(subset=["DATA", "CUSTO"]).sort_values("DATA")
+        "DATA": pd.to_datetime(cc_df_all.iloc[:, data_idx].astype(str), errors="coerce", dayfirst=True),
+        "CUSTO": cc_parse_currency_br(cc_df_all.iloc[:, cost_idx]),
+    }).dropna(subset=["DATA", "CUSTO"]).sort_values("DATA")
 
     if df_item.empty:
         continue
 
-    # descobrir rótulo do item olhando a linha superior ao cabeçalho
-    label_guess = _guess_item_label(df_raw, hdr, cost_idx, fallback=cost_name)
+    # rótulo do item olhando a linha acima (fallback no nome do custo)
+    label_guess = cc_guess_item_label(cc_df_raw, cc_hdr, cost_idx, fallback=cost_name)
 
-    items.append({
+    # DEDUPLICAÇÃO por rótulo
+    label_norm = cc_strip_acc_lower(label_guess)
+    if label_norm in cc_seen_labels:
+        continue
+    cc_seen_labels.add(label_norm)
+
+    cc_items.append({
         "label": label_guess,
         "cost_name": cost_name,
         "data_name": data_name,
@@ -523,32 +569,39 @@ for cost_idx in cost_idx_list:
         "df": df_item
     })
 
-if not items:
-    st.warning("Nenhum item com dados válidos (DATA + CUSTO) foi encontrado.")
+if not cc_items:
+    st.warning("Nenhum item com dados válidos (DATA + CUSTO) foi encontrado após os filtros.")
+    with st.expander("🔍 Debug de cabeçalhos de custo filtrados"):
+        df_debug = pd.DataFrame({
+            "col": list(cc_df_all.columns),
+            "norm": cc_norm_cols,
+            "is_valid_cost": [ cc_is_valid_cost_header(n) for n in cc_norm_cols ],
+        })
+        st.dataframe(df_debug)
     st.stop()
 
 # ------------------------------------------------------------
-# 5) UI: seleção de itens + toggle de rótulos
+# 4) UI — filtro de itens e rótulos
 # ------------------------------------------------------------
-labels_all = [it["label"] for it in items]
-sel_labels = st.multiselect("Itens para exibir nas cartas", labels_all, default=labels_all)
-mostrar_rotulos = st.checkbox("Mostrar rótulos de dados nas cartas", value=True)
+cc_labels_all = [it["label"] for it in cc_items]
+cc_sel_labels = st.multiselect("Itens para exibir nas cartas", cc_labels_all, default=cc_labels_all)
+cc_mostrar_rotulos = st.checkbox("Mostrar rótulos de dados nas cartas", value=True)
 
-# manter apenas selecionados
-items = [it for it in items if it["label"] in sel_labels]
+cc_items = [it for it in cc_items if it["label"] in cc_sel_labels]
+if not cc_items:
+    st.info("Selecione pelo menos um item para visualizar.")
+    st.stop()
 
 # ------------------------------------------------------------
-# 6) FUNÇÕES DE CARTA, FORMATAÇÃO E MÉTRICAS
+# 5) Funções de carta e métricas
 # ------------------------------------------------------------
-from matplotlib.ticker import FuncFormatter
-
-def _fmt_brl(v, pos=None):
+def cc_fmt_brl(v, pos=None):
     try:
         return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
     except:
         return v
 
-def desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
+def cc_desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
     y = pd.Series(y).astype(float)
     media = y.mean()
     desvio = y.std(ddof=1) if len(y) > 1 else 0.0
@@ -567,10 +620,8 @@ def desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
         ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70, zorder=3)
         ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70, zorder=3)
 
-    # Eixo Y em moeda BR
-    ax.yaxis.set_major_formatter(FuncFormatter(_fmt_brl))
+    ax.yaxis.set_major_formatter(FuncFormatter(cc_fmt_brl))
 
-    # Rótulos de dados
     if mostrar_rotulos:
         for xi, yi in zip(x, y):
             if pd.notna(yi):
@@ -591,7 +642,7 @@ def desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
     ax.legend(loc="best")
     st.pyplot(fig)
 
-def _ultimo_valido_positivo(ser: pd.Series) -> float:
+def cc_ultimo_valido_positivo(ser: pd.Series) -> float:
     s = pd.to_numeric(ser, errors="coerce")
     s = s[~s.isna()]
     if s.empty:
@@ -601,11 +652,8 @@ def _ultimo_valido_positivo(ser: pd.Series) -> float:
         return float(nz.iloc[-1])
     return float(s.iloc[-1])
 
-def _metricas_item(df_item: pd.DataFrame):
-    # Dia
-    ultimo = _ultimo_valido_positivo(df_item["CUSTO"])
-
-    # Semana/mês: referência é a última linha com custo > 0; se não houver, a última
+def cc_metricas_item(df_item: pd.DataFrame):
+    ultimo = cc_ultimo_valido_positivo(df_item["CUSTO"])
     mask_nz = df_item["CUSTO"].fillna(0) != 0
     idx_ref = mask_nz[mask_nz].index[-1] if mask_nz.any() else df_item.index[-1]
 
@@ -626,22 +674,25 @@ def _metricas_item(df_item: pd.DataFrame):
     return ultimo, custo_semana, custo_mes
 
 # ------------------------------------------------------------
-# 7) ABAS — UMA POR ITEM
+# 6) Uma aba por item
 # ------------------------------------------------------------
-tabs = st.tabs([it["label"] for it in items])
+cc_tabs = st.tabs([it["label"] for it in cc_items])
 
-for tab, it in zip(tabs, items):
+for tab, it in zip(cc_tabs, cc_items):
     with tab:
         df_item = it["df"]
 
-        # Métricas do item
-        ultimo, custo_semana, custo_mes = _metricas_item(df_item)
+        # Métricas
+        ultimo, custo_semana, custo_mes = cc_metricas_item(df_item)
         c1, c2, c3 = st.columns(3)
-        c1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c3.metric("Custo do Mês",    f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c1.metric("Custo do Dia",
+                  f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c2.metric("Custo da Semana",
+                  f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c3.metric("Custo do Mês",
+                  f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-        # Agregações do item
+        # Agregações
         df_day = df_item.groupby("DATA", as_index=False)["CUSTO"].sum().sort_values("DATA")
 
         df_week = (
@@ -658,16 +709,19 @@ for tab, it in zip(tabs, items):
 
         # Cartas
         st.subheader("📅 Carta Diária")
-        desenhar_carta(df_day["DATA"], df_day["CUSTO"], f"Custo Diário (R$) — {it['label']}", "R$", mostrar_rotulos=mostrar_rotulos)
+        cc_desenhar_carta(df_day["DATA"], df_day["CUSTO"],
+                          f"Custo Diário (R$) — {it['label']}", "R$", mostrar_rotulos=cc_mostrar_rotulos)
 
         st.subheader("🗓️ Carta Semanal (ISO)")
-        desenhar_carta(df_week["Data"], df_week["CUSTO"], f"Custo Semanal (R$) — {it['label']}", "R$", mostrar_rotulos=mostrar_rotulos)
+        cc_desenhar_carta(df_week["Data"], df_week["CUSTO"],
+                          f"Custo Semanal (R$) — {it['label']}", "R$", mostrar_rotulos=cc_mostrar_rotulos)
 
         st.subheader("📆 Carta Mensal")
-        desenhar_carta(df_month["Data"], df_month["CUSTO"], f"Custo Mensal (R$) — {it['label']}", "R$", mostrar_rotulos=mostrar_rotulos)
+        cc_desenhar_carta(df_month["Data"], df_month["CUSTO"],
+                          f"Custo Mensal (R$) — {it['label']}", "R$", mostrar_rotulos=cc_mostrar_rotulos)
 
-        # Debug opcional
+        # Debug do item
         with st.expander("🔍 Debug do item"):
             st.write("Coluna de DATA original:", it["data_name"], " | índice:", it["data_idx"])
             st.write("Coluna de CUSTO original:", it["cost_name"], " | índice:", it["cost_idx"])
-            st.dataframe(df_item.head())
+            st.dataframe(df_item.head(10))
