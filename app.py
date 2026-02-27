@@ -375,52 +375,76 @@ render_estados()
 #            (Rodapé da mesma página)
 # ============================================================
 st.markdown("---")
-st.header("🔴 Cartas de Controle — Custo Diário (R$)")
+st.header("🔴 Cartas de Controle — Custo (R$)")
 
 # Botão de recarregar (útil no Streamlit Cloud)
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
-# -------- LER ABA CONTROLE DE QUÍMICOS -------------
-GID_QUIM = "668859455"  # gid da aba 'Controle de Químicos'
-URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
+# -------- LER ABA DE GASTOS (nova planilha) -------------
+# Usaremos o gid informado por você
+GID_GASTOS = "668859455"
+URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
 
-dfq = pd.read_csv(URL_QUIM)
-dfq.columns = [str(c).strip() for c in dfq.columns]
+@st.cache_data(show_spinner=False)
+def _carregar_csv(url: str) -> pd.DataFrame:
+    df_local = pd.read_csv(url)
+    df_local.columns = [str(c).strip() for c in df_local.columns]
+    return df_local
 
-# Detectar a coluna de data
-data_cols = [c for c in dfq.columns if "data" in c.lower()]
-if not data_cols:
-    st.error("❌ Nenhuma coluna de Data encontrada.")
+def _strip_accents_lower(s: str) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.lower().strip()
+
+def _find_col(df_local: pd.DataFrame, keywords) -> str | None:
+    kws = [_strip_accents_lower(k) for k in keywords]
+    for c in df_local.columns:
+        norm = _strip_accents_lower(c)
+        if any(k in norm for k in kws):
+            return c
+    return None
+
+def _parse_currency_br(series: pd.Series) -> pd.Series:
+    """
+    Converte 'R$ 1.234,56' -> 1234.56, mantendo NaN quando não convertível.
+    """
+    s = series.astype(str).str.replace("\u00A0", " ", regex=False)  # NBSP
+    s = (
+        s.str.replace("R$", "", regex=False)
+         .str.replace(" ", "", regex=False)
+         .str.replace(".", "", regex=False)     # milhar
+         .str.replace(",", ".", regex=False)    # vírgula -> ponto
+    )
+    import re
+    s = s.apply(lambda x: re.sub(r"[^0-9\.\-]", "", x))             # remove extras
+    return pd.to_numeric(s, errors="coerce")
+
+# Carrega a nova aba de gastos
+dfq = _carregar_csv(URL_GASTOS)
+
+# Detecta colunas de Data e de Custo
+COL_DATA  = _find_col(dfq, ["data"])
+COL_CUSTO = _find_col(dfq, ["custo", "custos", "gasto", "gastos", "valor"])
+
+if not COL_DATA:
+    st.error("❌ Nenhuma coluna de Data encontrada (ex.: 'DATA').")
+    st.write("Colunas disponíveis:", dfq.columns.tolist())
     st.stop()
-COL_DATA = data_cols[0]
-
-# Parâmetro — custo diário
-PARAM = "Custo Diario (R$)"
-if PARAM not in dfq.columns:
-    st.error("❌ A coluna 'Custo Diario (R$)' não foi encontrada.")
+if not COL_CUSTO:
+    st.error("❌ Nenhuma coluna de Custo encontrada (ex.: 'CUSTOS $$', 'Custo', 'Gastos').")
     st.write("Colunas disponíveis:", dfq.columns.tolist())
     st.stop()
 
-# ---------- LIMPEZA BR ----------
-# Corrigir Data (DD/MM/AAAA)
-dfq[COL_DATA] = pd.to_datetime(dfq[COL_DATA], errors="coerce", dayfirst=True)
+# Limpeza / normalização
+dfq[COL_DATA]  = pd.to_datetime(dfq[COL_DATA], errors="coerce", dayfirst=True)
+dfq[COL_CUSTO] = _parse_currency_br(dfq[COL_CUSTO])
 
-# Corrigir número brasileiro para float
-dfq[PARAM] = (
-    dfq[PARAM]
-    .astype(str)
-    .str.replace("R$", "", regex=False)
-    .str.replace(" ", "", regex=False)
-    .str.replace(".", "", regex=False)     # remove milhar
-    .str.replace(",", ".", regex=False)    # vírgula -> ponto
-)
-dfq[PARAM] = pd.to_numeric(dfq[PARAM], errors="coerce")
-
-dfq = dfq.dropna(subset=[COL_DATA, PARAM]).sort_values(COL_DATA)
+dfq = dfq.dropna(subset=[COL_DATA, COL_CUSTO]).sort_values(COL_DATA)
 
 with st.expander("🔍 Dados carregados (debug)"):
-    st.dataframe(dfq[[COL_DATA, PARAM]].tail())
+    st.dataframe(dfq[[COL_DATA, COL_CUSTO]].tail())
 
 if dfq.empty:
     st.warning("Sem dados válidos para gerar as cartas.")
@@ -430,24 +454,24 @@ if dfq.empty:
 #   AGREGAÇÕES — DIÁRIA, SEMANAL (ISO), MENSAL
 # ===========================================================
 # DIÁRIA (soma por dia, em caso de duplicidades no mesmo dia)
-df_day = dfq.groupby(COL_DATA, as_index=False)[PARAM].sum().sort_values(COL_DATA)
+df_day = dfq.groupby(COL_DATA, as_index=False)[COL_CUSTO].sum().sort_values(COL_DATA)
 
 # SEMANAL (ISO – semanas começam na segunda)
 df_week = (
     dfq.assign(semana=dfq[COL_DATA].dt.to_period("W-MON"))
-       .groupby("semana", as_index=False)[PARAM].sum()
+       .groupby("semana", as_index=False)[COL_CUSTO].sum()
 )
 df_week["Data"] = df_week["semana"].dt.start_time
 
 # MENSAL (soma por mês calendário)
 df_month = (
     dfq.assign(mes=dfq[COL_DATA].dt.to_period("M"))
-       .groupby("mes", as_index=False)[PARAM].sum()
+       .groupby("mes", as_index=False)[COL_CUSTO].sum()
 )
 df_month["Data"] = df_month["mes"].dt.to_timestamp()
 
 # ===========================================================
-#     FUNÇÃO PARA DESENHAR CARTA X-BARRA (SEM key)
+#     FUNÇÃO PARA DESENHAR CARTA X-BARRA
 # ===========================================================
 def desenhar_carta(x, y, titulo, ylabel):
     y = pd.Series(y).astype(float)
@@ -457,7 +481,7 @@ def desenhar_carta(x, y, titulo, ylabel):
     LSC = media + 3*desvio
     LIC = media - 3*desvio
 
-    fig, ax = plt.subplots(figsize=(12,5))
+    fig, ax = plt.subplots(figsize=(12, 5))
 
     ax.plot(x, y, marker="o", label=titulo, color="#1565C0")
     ax.axhline(media, color="blue", linestyle="--", label="Média")
@@ -476,30 +500,29 @@ def desenhar_carta(x, y, titulo, ylabel):
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend()
 
-    # Sem 'key' aqui para evitar TypeError
     st.pyplot(fig)
 
 # ===========================================================
 #                       MÉTRICAS
 # ===========================================================
 # Custo do dia (último)
-ultimo = df_day[PARAM].iloc[-1]
+ultimo = df_day[COL_CUSTO].iloc[-1]
 
 # Custo semanal (soma) da semana ISO mais recente
 iso_week = dfq[COL_DATA].dt.isocalendar()
-dfq["__sem__"]   = iso_week.week.astype(int)
-dfq["__anoiso__"]= iso_week.year.astype(int)
+dfq["__sem__"]    = iso_week.week.astype(int)
+dfq["__anoiso__"] = iso_week.year.astype(int)
 
 ult_sem = dfq["__sem__"].iloc[-1]
 ult_ano = dfq["__anoiso__"].iloc[-1]
-custo_semana = dfq[(dfq["__sem__"]==ult_sem)&(dfq["__anoiso__"]==ult_ano)][PARAM].sum()
+custo_semana = dfq[(dfq["__sem__"] == ult_sem) & (dfq["__anoiso__"] == ult_ano)][COL_CUSTO].sum()
 
 # Custo mensal (soma) do mês/ano mais recente
 dfq["__mes__"] = dfq[COL_DATA].dt.month
 dfq["__ano__"] = dfq[COL_DATA].dt.year
-ult_mes = dfq["__mes__"].iloc[-1]
+ult_mes  = dfq["__mes__"].iloc[-1]
 ult_ano2 = dfq["__ano__"].iloc[-1]
-custo_mes = dfq[(dfq["__mes__"]==ult_mes)&(dfq["__ano__"]==ult_ano2)][PARAM].sum()
+custo_mes = dfq[(dfq["__mes__"] == ult_mes) & (dfq["__ano__"] == ult_ano2)][COL_CUSTO].sum()
 
 m1, m2, m3 = st.columns(3)
 m1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
@@ -513,16 +536,17 @@ st.subheader("📅 Carta Diária")
 if df_day.empty:
     st.info("Sem dados diários.")
 else:
-    desenhar_carta(df_day[COL_DATA], df_day[PARAM], "Custo Diário (R$)", "Custo Diário (R$)")
+    desenhar_carta(df_day[COL_DATA], df_day[COL_CUSTO], "Custo Diário (R$)", "Custo Diário (R$)")
 
 st.subheader("🗓️ Carta Semanal (ISO)")
 if df_week.empty:
     st.info("Sem dados semanais.")
 else:
-    desenhar_carta(df_week["Data"], df_week[PARAM], "Custo Semanal (R$)", "Custo Semanal (R$)")
+    desenhar_carta(df_week["Data"], df_week[COL_CUSTO], "Custo Semanal (R$)", "Custo Semanal (R$)")
 
 st.subheader("📆 Carta Mensal")
 if df_month.empty:
     st.info("Sem dados mensais.")
 else:
-    desenhar_carta(df_month["Data"], df_month[PARAM], "Custo Mensal (R$)", "Custo Mensal (R$)")
+    desenhar_carta(df_month["Data"], df_month[COL_CUSTO], "Custo Mensal (R$)", "Custo Mensal (R$)")
+``
