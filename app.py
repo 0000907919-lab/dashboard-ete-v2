@@ -356,320 +356,72 @@ def render_dqo():
 
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
+    if not
+def render_estados():
+    cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
     if not cols:
         return
-    _render_tiles_from_cols("Estados / Equipamentos", cols, n_cols=3, interpret_numeric_as_status=False)
+    _render_tiles_from_cols("Estados", cols, n_cols=4, interpret_numeric_as_status=False)
 
 # =========================
-# CABEÇALHO (última medição)
+# GOOGLE SHEETS – ABA 2 (Químicos)
 # =========================
-def header_info():
-    cand = ["carimbo de data/hora", "data", "operador"]
-    found = {}
-    for c in df.columns:
-        k = _strip_accents(c.lower())
-        if k in [_strip_accents(x) for x in cand]:
-            found[k] = c
-    col0, col1, col2 = st.columns(3)
-    if "carimbo de data/hora" in found:
-        col0.metric("Último carimbo", str(last_valid_raw(df, found["carimbo de data/hora"])))
-    elif "data" in found:
-        col0.metric("Data", str(last_valid_raw(df, found["data"])))
-    if "operador" in found:
-        col1.metric("Operador", str(last_valid_raw(df, found["operador"])))
-    col2.metric("Registros", f"{len(df)} linhas")
+GID_QMCS = "568520949"
+CSV_URL_QMCS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QMCS}"
+
+df_qmcs = pd.read_csv(CSV_URL_QMCS)
+df_qmcs.columns = [str(c).strip() for c in df_qmcs.columns]
+
+# Corrigir nomes das colunas no df_qmcs para evitar erros
+if "QUIMICOS" in df_qmcs.columns:
+    df_qmcs.rename(columns={"QUIMICOS": "QUÍMICOS"}, inplace=True)
 
 # =========================
-# DASHBOARD
+# RENDERIZAÇÃO QUÍMICOS
 # =========================
-st.title("Dashboard Operacional ETE")
-header_info()
+def render_quimicos():
+    st.subheader("Químicos")
 
-# Caçambas (gauge)
-render_cacambas_gauges("Caçambas")
+    # Exibir a tabela de químicos (última linha com dados)
+    df_qmcs_last = df_qmcs.tail(1).copy()
+    # Ajustar colunas para mostrar somente nomes sem acento em título
+    df_qmcs_last.columns = [col.title() for col in df_qmcs_last.columns]
 
-# Válvulas (cards com regra numérica=OK) — Nitrificação e MBBR
-render_tiles_split_status("Válvulas", KW_VALVULA)
+    st.dataframe(df_qmcs_last.T.rename(columns={df_qmcs_last.index[-1]: "Valor"}))
 
-# Sopradores (cards com regra numérica=OK) — Nitrificação e MBBR
-render_tiles_split_status("Sopradores", KW_SOPRADOR)
+# =========================
+# MAIN
+# =========================
+def main():
+    st.title("Dashboard Operacional ETE")
 
-# Demais grupos (sem mudar a regra)
-render_outros_niveis()
-render_vazoes()
-render_ph()
-render_sst()
-render_dqo()
-render_estados()
+    # Seção Caçambas (gauges)
+    st.header("Caçambas")
+    render_cacambas_gauges("Caçambas")
 
-# =========================================================
-# RESUMOS (texto) por status – SOPRADORES e VÁLVULAS
-# =========================================================
-def _status_from_raw_generic(raw, group_type: str):
-    # igual _status_from_raw_for_group, mas permite reutilizar para resumo
-    if raw is None:
-        return "—"
-    s = str(raw).strip()
-    v = to_float_ptbr(s)
-    if not np.isnan(v):
-        if group_type == "soprador":
-            return "OK" if v > BLOWER_O2_OK_THRESHOLD else "OFF"
-        if group_type == "valvula":
-            return "OK" if v > VALVE_NUMERIC_OK_THRESHOLD else "OFF"
-        return "—"
-    t = _strip_accents(s.lower())
-    if t in ["ok", "on", "ligado", "rodando", "aberto"]:
-        return "OK"
-    if t in ["nok", "falha", "erro"]:
-        return "NOK"
-    if t in ["off", "desligado", "fechado", "parado"]:
-        return "OFF"
-    return s.upper()
+    # Seção Válvulas (cards)
+    st.header("Válvulas")
+    cols_valvulas = _filter_columns_by_keywords(cols_lower_noacc, KW_VALVULA)
+    _render_tiles_from_cols("Válvulas", cols_valvulas, n_cols=4, interpret_numeric_as_status=True)
 
-def _collect_status(df_local: pd.DataFrame, keywords: list, grupo: str, group_type: str):
-    candidatos = []
-    for c in df_local.columns:
-        cn = _strip_accents(str(c).lower())
-        if any(k in cn for k in keywords) and (grupo in cn):
-            candidatos.append(c)
-    items, seen = [], set()
-    for c in candidatos:
-        num = _extract_number_int(c)
-        k = (grupo, num)
-        if k in seen:
-            continue
-        seen.add(k)
-        raw = last_valid_raw(df_local, c)
-        stt = _status_from_raw_generic(raw, group_type)
-        items.append((num, stt))
-    items.sort(key=lambda x: x[0])
-    return items
+    # Seção Sopradores (cards)
+    st.header("Sopradores")
+    cols_sopradores = _filter_columns_by_keywords(cols_lower_noacc, KW_SOPRADOR)
+    _render_tiles_from_cols("Sopradores", cols_sopradores, n_cols=4, interpret_numeric_as_status=True)
 
-def _classify(items):
-    ok, off, nok, outros = [], [], [], []
-    for num, stt in items:
-        s = str(stt).upper()
-        if s == "OK": ok.append(num)
-        elif s == "OFF": off.append(num)
-        elif s == "NOK": nok.append(num)
-        else: outros.append(f"{num} ({stt})")
-    return ok, off, nok, outros
+    # Seção Nitrificação e MBBR (cards com regra numérica OK)
+    render_tiles_split_status("Status", [])
 
-def _fmt(nums):
-    return ", ".join(str(n) for n in sorted(nums)) if nums else "—"
+    # Seções adicionais
+    render_outros_niveis()
+    render_vazoes()
+    render_ph()
+    render_sst()
+    render_dqo()
+    render_estados()
 
-st.markdown("### 🟢 Resumo por status (antes das cartas)")
-colA, colB = st.columns(2)
+    # Químicos (aba 2)
+    render_quimicos()
 
-# Sopradores
-s_mbbr = _collect_status(df, KW_SOPRADOR, "mbbr", "soprador")
-s_nitr = _collect_status(df, KW_SOPRADOR, "nitr", "soprador")
-ok_m, off_m, nok_m, out_m = _classify(s_mbbr)
-ok_n, off_n, nok_n, out_n = _classify(s_nitr)
-with colA:
-    st.markdown("**Sopradores – MBBR**")
-    st.write(f"OK: {_fmt(ok_m)}")
-    if off_m: st.write(f"OFF: {_fmt(off_m)}")
-    if nok_m: st.write(f"NOK: {_fmt(nok_m)}")
-    if out_m: st.caption("Outros: " + ", ".join(out_m))
-    st.caption(f"Rodando: {len(ok_m)} de {len(s_mbbr)}")
-with colB:
-    st.markdown("**Sopradores – Nitrificação**")
-    st.write(f"OK: {_fmt(ok_n)}")
-    if off_n: st.write(f"OFF: {_fmt(off_n)}")
-    if nok_n: st.write(f"NOK: {_fmt(nok_n)}")
-    if out_n: st.caption("Outros: " + ", ".join(out_n))
-    st.caption(f"Rodando: {len(ok_n)} de {len(s_nitr)}")
-
-# Válvulas
-v_mbbr = _collect_status(df, KW_VALVULA, "mbbr", "valvula")
-v_nitr = _collect_status(df, KW_VALVULA, "nitr", "valvula")
-ok_vm, off_vm, nok_vm, out_vm = _classify(v_mbbr)
-ok_vn, off_vn, nok_vn, out_vn = _classify(v_nitr)
-colC, colD = st.columns(2)
-with colC:
-    st.markdown("**Válvulas – MBBR**")
-    st.write(f"OK: {_fmt(ok_vm)}")
-    if off_vm: st.write(f"OFF: {_fmt(off_vm)}")
-    if nok_vm: st.write(f"NOK: {_fmt(nok_vm)}")
-    if out_vm: st.caption("Outros: " + ", ".join(out_vm))
-    st.caption(f"Ativas: {len(ok_vm)} de {len(v_mbbr)}")
-with colD:
-    st.markdown("**Válvulas – Nitrificação**")
-    st.write(f"OK: {_fmt(ok_vn)}")
-    if off_vn: st.write(f"OFF: {_fmt(off_vn)}")
-    if nok_vn: st.write(f"NOK: {_fmt(nok_vn)}")
-    if out_vn: st.caption("Outros: " + ", ".join(out_vn))
-    st.caption(f"Ativas: {len(ok_vn)} de {len(v_nitr)}")
- # =========================================================
-# CARTAS DE CONTROLE – MULTI QUÍMICOS (FUNCIONANDO)
-# =========================================================
-
-st.markdown("---")
-st.header("🔴 Cartas de Controle — Custos dos Químicos")
-
-# 1) Defina a URL da aba de químicos (use &gid=, não &amp;gid=)
-GID_QUIM = "668859455"
-URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
-
-# 2) Leitura correta:
-#    - linha 0 = “faixa azul” (nomes dos produtos)
-#    - linha 1 = rótulos das colunas (DATA, CONSUMO, CUSTO $$, etc.)
-#    - dados começam na linha 2
-dfraw = pd.read_csv(URL_QUIM, header=None, dtype=str)
-
-linha_nomes = dfraw.iloc[0].tolist()     # nomes dos produtos (podem ter células mescladas)
-header_row  = dfraw.iloc[1].tolist()     # rótulos oficiais (DATA, CUSTO $$, ...)
-
-dfq = dfraw.iloc[2:].copy()
-dfq.columns = header_row
-dfq = dfq.reset_index(drop=True)
-
-# 3) Detecta colunas DATA e CUSTO $$ literalmente
-colunas = [str(c).strip() for c in dfq.columns]
-indices_data  = [i for i, c in enumerate(colunas) if c.upper() == "DATA"]
-indices_custo = [i for i, c in enumerate(colunas) if c.upper() == "CUSTO $$"]
-
-# (Opcional) Debug: veja o que foi lido
-with st.expander("🔧 Debug (químicos)"):
-    st.write("URL_QUIM:", URL_QUIM)
-    st.write("Cabeçalhos lidos:", colunas)
-    st.write("Indices DATA:", indices_data, " | Indices CUSTO $$:", indices_custo)
-    st.dataframe(dfq.head(5), use_container_width=True)
-
-dfs_quim = []
-
-def _nome_quimico_por_cabecalho(idx_data_col: int) -> str:
-    """
-    Pega o nome do produto olhando a 'faixa azul' (linha_nomes) na MESMA coluna do DATA.
-    Se vier vazio (por célula mesclada no export), anda para a esquerda até achar um não-vazio.
-    Como fallback, tenta deduzir pelo rótulo 'CONSUMO DIÁRIO - XXX'.
-    """
-    # 1) mesma coluna do DATA
-    if idx_data_col < len(linha_nomes):
-        nm = (linha_nomes[idx_data_col] or "").strip()
-        if nm:
-            return nm
-
-    # 2) varre para a esquerda (lida com mesclagem)
-    j = idx_data_col - 1
-    while j >= 0:
-        val = (linha_nomes[j] or "").strip()
-        if val:
-            return val
-        j -= 1
-
-    # 3) tenta deduzir pelo rótulo ao lado (CONSUMO DIÁRIO - XXX)
-    if (idx_data_col + 1) < len(header_row):
-        consumo_lbl = (header_row[idx_data_col + 1] or "").strip()
-        if consumo_lbl:
-            nm = (consumo_lbl
-                  .replace("CONSUMO DIÁRIO", "")
-                  .replace("CONSUMO DIARIO", "")
-                  .replace("-", "")
-                  .strip())
-            if nm:
-                return nm
-
-    # 4) fallback
-    return f"Químico col {idx_data_col}"
-
-def _preparar_dados_quimico(df: pd.DataFrame, idx_data: int, idx_custo: int, nome: str) -> pd.DataFrame:
-    dtmp = df[[df.columns[idx_data], df.columns[idx_custo]]].copy()
-    dtmp.columns = ["DATA", "CUSTO"]
-
-    # Datas PT-BR
-    dtmp["DATA"] = pd.to_datetime(dtmp["DATA"], dayfirst=True, errors="coerce")
-
-    # Moeda PT-BR -> float
-    dtmp["CUSTO"] = (
-        dtmp["CUSTO"].astype(str)
-        .str.replace("R$", "", regex=False)
-        .str.replace(" ",  "", regex=False)
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
-    )
-    dtmp["CUSTO"] = pd.to_numeric(dtmp["CUSTO"], errors="coerce")
-
-    dtmp = dtmp.dropna(subset=["DATA", "CUSTO"]).sort_values("DATA")
-    dtmp["Quimico"] = nome
-    return dtmp
-
-# 4) Monta um dataframe por químico: DATA -> (primeiro) CUSTO $$ à direita
-for idx_data in indices_data:
-    # pega o primeiro "CUSTO $$" depois do DATA
-    custos_validos = [i for i in indices_custo if i > idx_data]
-    if not custos_validos:
-        continue
-    idx_custo = custos_validos[0]
-
-    nome_quimico = _nome_quimico_por_cabecalho(idx_data)
-    dfs_quim.append(_preparar_dados_quimico(dfq, idx_data, idx_custo, nome_quimico))
-
-if not dfs_quim:
-    st.error("Nenhum químico detectado. Confira se existem colunas 'DATA' e 'CUSTO $$' exatamente com esses nomes.")
-    st.stop()
-
-df_final = pd.concat(dfs_quim, ignore_index=True)
-
-# 5) Função da carta de controle
-def desenhar_carta(x, y, titulo, ylabel):
-    y = pd.Series(y).astype(float)
-    n = len(y)
-    media = y.mean()
-    desvio = y.std(ddof=1) if n > 1 else 0.0
-    LSC = media + 3 * desvio
-    LIC = media - 3 * desvio
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(x, y, marker="o", color="#1565C0", label=titulo)
-    ax.axhline(media, linestyle="--", color="blue", label="Média")
-
-    if desvio > 0:
-        ax.axhline(LSC, linestyle="--", color="red",  label="LSC (+3σ)")
-        ax.axhline(LIC, linestyle="--", color="red",  label="LIC (−3σ)")
-        xs = pd.Series(x)
-        acima  = y >  LSC
-        abaixo = y <  LIC
-        ax.scatter(xs[acima],  y[acima],  color="red", marker="^", s=70)
-        ax.scatter(xs[abaixo], y[abaixo], color="red", marker="v", s=70)
-
-    ax.set_title(titulo)
-    ax.set_ylabel(ylabel)
-    ax.set_xlabel("Data")
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend()
-    st.pyplot(fig)
-
-# 6) (Opcional) Debug rápido do resultado consolidado
-with st.expander("🔍 Dados detectados (consolidados)"):
-    st.write("Químicos:", sorted(df_final["Quimico"].unique()))
-    st.dataframe(df_final.head(20), use_container_width=True)
-
-# 7) Cartas por químico
-for quim in df_final["Quimico"].unique():
-    bloco = df_final[df_final["Quimico"] == quim]
-
-    st.subheader(f"📌 {quim}")
-
-    # Diária
-    st.markdown("### 📅 Carta Diária")
-    desenhar_carta(bloco["DATA"], bloco["CUSTO"], f"Custo Diário — {quim}", "Custo (R$)")
-
-    # Semanal (ISO, inicia na segunda)
-    df_week = (
-        bloco.assign(semana=bloco["DATA"].dt.to_period("W-MON"))
-             .groupby("semana", as_index=False)["CUSTO"].sum()
-    )
-    df_week["Data"] = df_week["semana"].dt.start_time
-    st.markdown("### 🗓️ Carta Semanal (ISO)")
-    desenhar_carta(df_week["Data"], df_week["CUSTO"], f"Custo Semanal — {quim}", "Custo (R$)")
-
-    # Mensal
-    df_month = (
-        bloco.assign(mes=bloco["DATA"].dt.to_period("M"))
-             .groupby("mes", as_index=False)["CUSTO"].sum()
-    )
-    df_month["Data"] = df_month["mes"].dt.to_timestamp()
-    st.markdown("### 📆 Carta Mensal")
-    desenhar_carta(df_month["Data"], df_month["CUSTO"], f"Custo Mensal — {quim}", "Custo (R$)")
+if __name__ == "__main__":
+    main()
