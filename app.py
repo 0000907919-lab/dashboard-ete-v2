@@ -501,28 +501,26 @@ with colD:
     if nok_vn: st.write(f"NOK: {_fmt(nok_vn)}")
     if out_vn: st.caption("Outros: " + ", ".join(out_vn))
     st.caption(f"Ativas: {len(ok_vn)} de {len(v_nitr)}")
-    # =========================================================
+ # =========================================================
 # CARTAS DE CONTROLE – MULTI QUÍMICOS (FUNCIONANDO)
 # =========================================================
 
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custos dos Químicos")
 
-# 1) Garante que a URL da aba esteja definida ANTES de ler
-try:
-    URL_QUIM
-except NameError:
-    GID_QUIM = "668859455"
-    URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
+# 1) Defina a URL da aba de químicos (use &gid=, não &amp;gid=)
+GID_QUIM = "668859455"
+URL_QUIM = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_QUIM}"
 
-# 2) Lê o CSV bruto: linha 0 = nomes dos produtos (cabeçalho azul), linha 1 = rótulos (DATA, CUSTO $$ etc.)
+# 2) Leitura correta:
+#    - linha 0 = “faixa azul” (nomes dos produtos)
+#    - linha 1 = rótulos das colunas (DATA, CONSUMO, CUSTO $$, etc.)
+#    - dados começam na linha 2
 dfraw = pd.read_csv(URL_QUIM, header=None, dtype=str)
 
-# guarda a “faixa azul” (nomes) e a linha de rótulos do bloco
-linha_nomes  = dfraw.iloc[0].tolist()     # nomes dos produtos (podem ter células mescladas -> vazias em algumas colunas)
-header_row   = dfraw.iloc[1].tolist()     # rótulos (DATA, CONSUMO DIÁRIO..., CUSTO $$, etc.)
+linha_nomes = dfraw.iloc[0].tolist()     # nomes dos produtos (podem ter células mescladas)
+header_row  = dfraw.iloc[1].tolist()     # rótulos oficiais (DATA, CUSTO $$, ...)
 
-# dados começam na linha 2 em diante
 dfq = dfraw.iloc[2:].copy()
 dfq.columns = header_row
 dfq = dfq.reset_index(drop=True)
@@ -532,55 +530,62 @@ colunas = [str(c).strip() for c in dfq.columns]
 indices_data  = [i for i, c in enumerate(colunas) if c.upper() == "DATA"]
 indices_custo = [i for i, c in enumerate(colunas) if c.upper() == "CUSTO $$"]
 
+# (Opcional) Debug: veja o que foi lido
+with st.expander("🔧 Debug (químicos)"):
+    st.write("URL_QUIM:", URL_QUIM)
+    st.write("Cabeçalhos lidos:", colunas)
+    st.write("Indices DATA:", indices_data, " | Indices CUSTO $$:", indices_custo)
+    st.dataframe(dfq.head(5), use_container_width=True)
+
 dfs_quim = []
 
 def _nome_quimico_por_cabecalho(idx_data_col: int) -> str:
     """
-    Busca o nome do produto olhando a linha 'azul' (linha 0) na MESMA coluna do DATA.
-    Se estiver vazio (por célula mesclada), anda para a esquerda até achar o mais próximo não-vazio.
-    Se persistir vazio, tenta deduzir pelo rótulo 'CONSUMO DIÁRIO - XXX' (coluna idx_data+1).
+    Pega o nome do produto olhando a 'faixa azul' (linha_nomes) na MESMA coluna do DATA.
+    Se vier vazio (por célula mesclada no export), anda para a esquerda até achar um não-vazio.
+    Como fallback, tenta deduzir pelo rótulo 'CONSUMO DIÁRIO - XXX'.
     """
-    # 1) tenta na mesma coluna do DATA
-    nm = str(linha_nomes[idx_data_col]).strip() if idx_data_col < len(linha_nomes) else ""
-    if nm:
-        return nm
+    # 1) mesma coluna do DATA
+    if idx_data_col < len(linha_nomes):
+        nm = (linha_nomes[idx_data_col] or "").strip()
+        if nm:
+            return nm
 
-    # 2) varre à esquerda para lidar com célula mesclada no export do Google Sheets
+    # 2) varre para a esquerda (lida com mesclagem)
     j = idx_data_col - 1
     while j >= 0:
-        val = str(linha_nomes[j]).strip()
+        val = (linha_nomes[j] or "").strip()
         if val:
             return val
         j -= 1
 
-    # 3) tenta deduzir a partir do rótulo de consumo (se existir)
-    consumo_label = header_row[idx_data_col + 1] if (idx_data_col + 1) < len(header_row) else ""
-    if consumo_label:
-        nm = (
-            str(consumo_label)
-            .replace("CONSUMO DIÁRIO", "")
-            .replace("CONSUMO DIARIO", "")
-            .replace("-", "")
-            .strip()
-        )
-        if nm:
-            return nm
+    # 3) tenta deduzir pelo rótulo ao lado (CONSUMO DIÁRIO - XXX)
+    if (idx_data_col + 1) < len(header_row):
+        consumo_lbl = (header_row[idx_data_col + 1] or "").strip()
+        if consumo_lbl:
+            nm = (consumo_lbl
+                  .replace("CONSUMO DIÁRIO", "")
+                  .replace("CONSUMO DIARIO", "")
+                  .replace("-", "")
+                  .strip())
+            if nm:
+                return nm
 
     # 4) fallback
     return f"Químico col {idx_data_col}"
 
-def preparar_dados_quimico(df: pd.DataFrame, idx_data: int, idx_custo: int, nome: str) -> pd.DataFrame:
+def _preparar_dados_quimico(df: pd.DataFrame, idx_data: int, idx_custo: int, nome: str) -> pd.DataFrame:
     dtmp = df[[df.columns[idx_data], df.columns[idx_custo]]].copy()
     dtmp.columns = ["DATA", "CUSTO"]
 
-    # Datas no padrão PT-BR
+    # Datas PT-BR
     dtmp["DATA"] = pd.to_datetime(dtmp["DATA"], dayfirst=True, errors="coerce")
 
-    # Limpeza de moeda BR
+    # Moeda PT-BR -> float
     dtmp["CUSTO"] = (
         dtmp["CUSTO"].astype(str)
         .str.replace("R$", "", regex=False)
-        .str.replace(" ", "", regex=False)
+        .str.replace(" ",  "", regex=False)
         .str.replace(".", "", regex=False)
         .str.replace(",", ".", regex=False)
     )
@@ -590,31 +595,24 @@ def preparar_dados_quimico(df: pd.DataFrame, idx_data: int, idx_custo: int, nome
     dtmp["Quimico"] = nome
     return dtmp
 
-# 4) Constrói cada bloco DATA -> CUSTO $$, com nome robusto
+# 4) Monta um dataframe por químico: DATA -> (primeiro) CUSTO $$ à direita
 for idx_data in indices_data:
-    # pega o primeiro "CUSTO $$" à direita do DATA
+    # pega o primeiro "CUSTO $$" depois do DATA
     custos_validos = [i for i in indices_custo if i > idx_data]
     if not custos_validos:
         continue
     idx_custo = custos_validos[0]
 
     nome_quimico = _nome_quimico_por_cabecalho(idx_data)
-    dfs_quim.append(preparar_dados_quimico(dfq, idx_data, idx_custo, nome_quimico))
+    dfs_quim.append(_preparar_dados_quimico(dfq, idx_data, idx_custo, nome_quimico))
 
 if not dfs_quim:
-    with st.expander("🔧 Debug (químicos)"):
-        st.write("URL_QUIM:", URL_QUIM)
-        st.write("header_row:", header_row)
-        st.write("colunas (após header):", colunas)
-        st.write("indices_data:", indices_data)
-        st.write("indices_custo:", indices_custo)
-        st.write("linha_nomes (azul):", linha_nomes)
-    st.error("Nenhum químico detectado. Verifique se a planilha tem 'DATA' e 'CUSTO $$' exatamente nesses termos.")
+    st.error("Nenhum químico detectado. Confira se existem colunas 'DATA' e 'CUSTO $$' exatamente com esses nomes.")
     st.stop()
 
 df_final = pd.concat(dfs_quim, ignore_index=True)
 
-# 5) Função para carta de controle
+# 5) Função da carta de controle
 def desenhar_carta(x, y, titulo, ylabel):
     y = pd.Series(y).astype(float)
     n = len(y)
@@ -628,13 +626,12 @@ def desenhar_carta(x, y, titulo, ylabel):
     ax.axhline(media, linestyle="--", color="blue", label="Média")
 
     if desvio > 0:
-        ax.axhline(LSC, linestyle="--", color="red", label="LSC (+3σ)")
-        ax.axhline(LIC, linestyle="--", color="red", label="LIC (−3σ)")
-        # marca pontos fora de controle
+        ax.axhline(LSC, linestyle="--", color="red",  label="LSC (+3σ)")
+        ax.axhline(LIC, linestyle="--", color="red",  label="LIC (−3σ)")
         xs = pd.Series(x)
-        acima = y > LSC
-        abaixo = y < LIC
-        ax.scatter(xs[acima], y[acima], color="red", marker="^", s=70)
+        acima  = y >  LSC
+        abaixo = y <  LIC
+        ax.scatter(xs[acima],  y[acima],  color="red", marker="^", s=70)
         ax.scatter(xs[abaixo], y[abaixo], color="red", marker="v", s=70)
 
     ax.set_title(titulo)
@@ -644,9 +641,9 @@ def desenhar_carta(x, y, titulo, ylabel):
     ax.legend()
     st.pyplot(fig)
 
-# 6) (Opcional) Debug rápido
-with st.expander("🔍 Dados detectados (debug)"):
-    st.write("Químicos detectados:", sorted(df_final["Quimico"].unique()))
+# 6) (Opcional) Debug rápido do resultado consolidado
+with st.expander("🔍 Dados detectados (consolidados)"):
+    st.write("Químicos:", sorted(df_final["Quimico"].unique()))
     st.dataframe(df_final.head(20), use_container_width=True)
 
 # 7) Cartas por químico
@@ -659,7 +656,7 @@ for quim in df_final["Quimico"].unique():
     st.markdown("### 📅 Carta Diária")
     desenhar_carta(bloco["DATA"], bloco["CUSTO"], f"Custo Diário — {quim}", "Custo (R$)")
 
-    # Semanal (ISO, início na segunda-feira)
+    # Semanal (ISO, inicia na segunda)
     df_week = (
         bloco.assign(semana=bloco["DATA"].dt.to_period("W-MON"))
              .groupby("semana", as_index=False)["CUSTO"].sum()
