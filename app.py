@@ -380,15 +380,15 @@ st.header("🔴 Cartas de Controle — Custo (R$)")
 # Botão de recarregar (útil no Streamlit Cloud)
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
-
-# -------- LER ABA DE GASTOS (nova planilha) -------------
-# Usaremos o gid informado por você
-GID_GASTOS = "668859455"
+# -------- LER ABA DE GASTOS (mais robusto) -------------
+GID_GASTOS = "668859455"  # gid informado por você
 URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
 
 @st.cache_data(show_spinner=False)
-def _carregar_csv(url: str) -> pd.DataFrame:
-    df_local = pd.read_csv(url)
+def _carregar_csv_textual(url: str) -> pd.DataFrame:
+    # Lê tudo como texto para não perder informação antes de achar o cabeçalho
+    df_local = pd.read_csv(url, dtype=str, keep_default_na=False)  # strings vazias em vez de NaN
+    # Strip nos nomes originais
     df_local.columns = [str(c).strip() for c in df_local.columns]
     return df_local
 
@@ -397,6 +397,36 @@ def _strip_accents_lower(s: str) -> str:
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.lower().strip()
+
+def _find_header_row(df_text: pd.DataFrame, max_scan: int = 30) -> int | None:
+    """
+    Procura a linha que parece ser o cabeçalho contendo 'data' e 'custo(s)/gasto(s)/valor'.
+    Vasculha até `max_scan` primeiras linhas.
+    """
+    kws_data  = ["data"]
+    kws_custo = ["custo", "custos", "gasto", "gastos", "valor"]
+    n_scan = min(len(df_text), max_scan)
+    for i in range(n_scan):
+        row_vals = [_strip_accents_lower(v) for v in df_text.iloc[i].tolist()]
+        has_data  = any("data" in v for v in row_vals)
+        has_custo = any(any(k in v for k in kws_custo) for v in row_vals)
+        if has_data and has_custo:
+            return i
+    return None
+
+def _reheader(df_text: pd.DataFrame, header_row_idx: int) -> pd.DataFrame:
+    new_cols = [str(c).strip() for c in df_text.iloc[header_row_idx].tolist()]
+    df2 = df_text.iloc[header_row_idx+1 : ].copy()
+    df2.columns = new_cols
+    # remove colunas completamente vazias
+    empty_cols = [c for c in df2.columns if df2[c].astype(str).str.strip().eq("").all()]
+    if empty_cols:
+        df2 = df2.drop(columns=empty_cols)
+    # remove linhas completamente vazias
+    df2 = df2[~df2.apply(lambda r: all(str(x).strip()=="" for x in r), axis=1)]
+    # strip nas colunas
+    df2.columns = [c.strip() for c in df2.columns]
+    return df2
 
 def _find_col(df_local: pd.DataFrame, keywords) -> str | None:
     kws = [_strip_accents_lower(k) for k in keywords]
@@ -407,9 +437,7 @@ def _find_col(df_local: pd.DataFrame, keywords) -> str | None:
     return None
 
 def _parse_currency_br(series: pd.Series) -> pd.Series:
-    """
-    Converte 'R$ 1.234,56' -> 1234.56, mantendo NaN quando não convertível.
-    """
+    import re
     s = series.astype(str).str.replace("\u00A0", " ", regex=False)  # NBSP
     s = (
         s.str.replace("R$", "", regex=False)
@@ -417,33 +445,46 @@ def _parse_currency_br(series: pd.Series) -> pd.Series:
          .str.replace(".", "", regex=False)     # milhar
          .str.replace(",", ".", regex=False)    # vírgula -> ponto
     )
-    import re
-    s = s.apply(lambda x: re.sub(r"[^0-9\.\-]", "", x))             # remove extras
+    s = s.apply(lambda x: re.sub(r"[^0-9\.\-]", "", x))
     return pd.to_numeric(s, errors="coerce")
 
-# Carrega a nova aba de gastos
-dfq = _carregar_csv(URL_GASTOS)
+# 1) Carrega como texto
+df_raw = _carregar_csv_textual(URL_GASTOS)
 
-# Detecta colunas de Data e de Custo
+# 2) Tenta achar a linha-cabeçalho
+hdr = _find_header_row(df_raw, max_scan=40)
+
+if hdr is None:
+    st.error("❌ Nenhuma linha de cabeçalho com 'DATA' e 'CUSTO(S)/GASTO(S)/VALOR' foi encontrada nas primeiras linhas.")
+    st.write("Colunas lidas (linha 0):", df_raw.columns.tolist())
+    st.stop()
+
+# 3) Reconstroi o dataframe com o cabeçalho correto
+dfq = _reheader(df_raw, hdr)
+
+# 4) Detecta colunas de Data e de Custo
 COL_DATA  = _find_col(dfq, ["data"])
-COL_CUSTO = _find_col(dfq, ["custo", "custos", "gasto", "gastos", "valor"])
+COL_CUSTO = _find_col(dfq, ["custo", "custos", "gasto", "gastos", "valor", "custos $$"])
 
 if not COL_DATA:
-    st.error("❌ Nenhuma coluna de Data encontrada (ex.: 'DATA').")
-    st.write("Colunas disponíveis:", dfq.columns.tolist())
+    st.error("❌ Nenhuma coluna de Data encontrada após reprocessar cabeçalho.")
+    st.write("Colunas disponíveis:", list(dfq.columns))
     st.stop()
 if not COL_CUSTO:
-    st.error("❌ Nenhuma coluna de Custo encontrada (ex.: 'CUSTOS $$', 'Custo', 'Gastos').")
-    st.write("Colunas disponíveis:", dfq.columns.tolist())
+    st.error("❌ Nenhuma coluna de Custo encontrada após reprocessar cabeçalho.")
+    st.write("Colunas disponíveis:", list(dfq.columns))
     st.stop()
 
-# Limpeza / normalização
-dfq[COL_DATA]  = pd.to_datetime(dfq[COL_DATA], errors="coerce", dayfirst=True)
+# 5) Converte Data e Custo
+dfq[COL_DATA]  = pd.to_datetime(dfq[COL_DATA].astype(str), errors="coerce", dayfirst=True)
 dfq[COL_CUSTO] = _parse_currency_br(dfq[COL_CUSTO])
 
+# Limpa e ordena
 dfq = dfq.dropna(subset=[COL_DATA, COL_CUSTO]).sort_values(COL_DATA)
 
 with st.expander("🔍 Dados carregados (debug)"):
+    st.write("Cabeçalho detectado na linha:", hdr)
+    st.write("Coluna de Data:", COL_DATA, " | Coluna de Custo:", COL_CUSTO)
     st.dataframe(dfq[[COL_DATA, COL_CUSTO]].tail())
 
 if dfq.empty:
@@ -453,17 +494,14 @@ if dfq.empty:
 # ===========================================================
 #   AGREGAÇÕES — DIÁRIA, SEMANAL (ISO), MENSAL
 # ===========================================================
-# DIÁRIA (soma por dia, em caso de duplicidades no mesmo dia)
 df_day = dfq.groupby(COL_DATA, as_index=False)[COL_CUSTO].sum().sort_values(COL_DATA)
 
-# SEMANAL (ISO – semanas começam na segunda)
 df_week = (
     dfq.assign(semana=dfq[COL_DATA].dt.to_period("W-MON"))
        .groupby("semana", as_index=False)[COL_CUSTO].sum()
 )
 df_week["Data"] = df_week["semana"].dt.start_time
 
-# MENSAL (soma por mês calendário)
 df_month = (
     dfq.assign(mes=dfq[COL_DATA].dt.to_period("M"))
        .groupby("mes", as_index=False)[COL_CUSTO].sum()
@@ -482,7 +520,6 @@ def desenhar_carta(x, y, titulo, ylabel):
     LIC = media - 3*desvio
 
     fig, ax = plt.subplots(figsize=(12, 5))
-
     ax.plot(x, y, marker="o", label=titulo, color="#1565C0")
     ax.axhline(media, color="blue", linestyle="--", label="Média")
 
@@ -499,16 +536,13 @@ def desenhar_carta(x, y, titulo, ylabel):
     ax.set_xlabel("Data")
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend()
-
     st.pyplot(fig)
 
 # ===========================================================
 #                       MÉTRICAS
 # ===========================================================
-# Custo do dia (último)
 ultimo = df_day[COL_CUSTO].iloc[-1]
 
-# Custo semanal (soma) da semana ISO mais recente
 iso_week = dfq[COL_DATA].dt.isocalendar()
 dfq["__sem__"]    = iso_week.week.astype(int)
 dfq["__anoiso__"] = iso_week.year.astype(int)
@@ -517,7 +551,6 @@ ult_sem = dfq["__sem__"].iloc[-1]
 ult_ano = dfq["__anoiso__"].iloc[-1]
 custo_semana = dfq[(dfq["__sem__"] == ult_sem) & (dfq["__anoiso__"] == ult_ano)][COL_CUSTO].sum()
 
-# Custo mensal (soma) do mês/ano mais recente
 dfq["__mes__"] = dfq[COL_DATA].dt.month
 dfq["__ano__"] = dfq[COL_DATA].dt.year
 ult_mes  = dfq["__mes__"].iloc[-1]
