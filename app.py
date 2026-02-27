@@ -443,13 +443,32 @@ dfraw = pd.read_csv(URL_QUIM, header=None, dtype=str)
 linha_nomes = dfraw.iloc[0].tolist()
 
 # Linha de rótulos (DATA, CONSUMO DIÁRIO, META, CUSTO $$ etc.)
-header_row = dfraw.iloc[1].tolist()
+_raw_header = dfraw.iloc[1].tolist()
+
+# Normaliza: string, strip e trata vazios
+header_row = []
+for h in _raw_header:
+    s = "" if (h is None or (isinstance(h, float) and pd.isna(h))) else str(h).strip()
+    header_row.append(s if s != "" else "COLUNA_VAZIA")
+
+# Garante nomes únicos (evita erro de colunas duplicadas no Arrow/Streamlit)
+def _make_unique(names):
+    seen = {}
+    out = []
+    for n in names:
+        seen[n] = seen.get(n, 0) + 1
+        out.append(n if seen[n] == 1 else f"{n}__{seen[n]}")
+    return out
+
+header_unique = _make_unique(header_row)
 
 # Dados começam na linha 2
 dfq = dfraw.iloc[2:].copy()
-dfq.columns = header_row
-dfq = dfq.reset_index(drop=True)
+dfq.columns = header_unique
 
+# Remove colunas duplicadas (por segurança extra) e reseta índice
+dfq = dfq.loc[:, ~pd.Index(dfq.columns).duplicated()].reset_index(drop=True)
+``
 # Identifica colunas
 colunas = [str(c).strip() for c in dfq.columns]
 indices_data  = [i for i, c in enumerate(colunas) if c.upper() == "DATA"]
