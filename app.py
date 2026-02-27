@@ -370,7 +370,7 @@ render_sst()
 render_dqo()
 render_estados()
 # ============================================================
-#        CARTA DE CONTROLE – DETECÇÃO ROBUSTA DE CABEÇALHO
+#        CARTAS DE CONTROLE — CUSTO (R$)  [ROBUSTO MULTI-BLOCO]
 # ============================================================
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custo (R$)")
@@ -378,18 +378,17 @@ st.header("🔴 Cartas de Controle — Custo (R$)")
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
-# ---- CONFIG: GID da aba de gastos ----
-GID_GASTOS = "668859455"
+# ---- CONFIG: GID da aba de gastos (da sua imagem) ----
+GID_GASTOS = "668859455"  # você confirmou esse GID na captura
 URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_GASTOS}"
 
 # ------------------------------------------------------------
-# 1) CARREGA O CSV DE FORMA COMPLETA (COM TODAS AS LINHAS)
+# 1) CARREGAR CSV COMO TEXTO (SEM HEADER) PARA NÃO PERDER LINHAS
 # ------------------------------------------------------------
-df_raw = pd.read_csv(URL_GASTOS, dtype=str, keep_default_na=False)
-df_raw.columns = [c.strip() for c in df_raw.columns]
+df_raw = pd.read_csv(URL_GASTOS, dtype=str, keep_default_na=False, header=None)
 
 # ------------------------------------------------------------
-# 2) FUNÇÕES AUXILIARES PARA DETECÇÃO DE CABEÇALHO
+# 2) AUXILIARES
 # ------------------------------------------------------------
 def _strip_acc_lower(s: str) -> str:
     import unicodedata
@@ -397,100 +396,102 @@ def _strip_acc_lower(s: str) -> str:
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.lower().strip()
 
-def encontrar_linha_header(df, max_lin=40):
+def _find_header_row(df_txt: pd.DataFrame, max_scan: int = 60) -> int | None:
     """
-    Procura a linha onde apareçam 'DATA' e 'CUSTO/CUSTOS/GASTO/VALOR'
+    Acha a linha do cabeçalho: deve conter 'data' e também algum de
+    {'custo','custos','gasto','gastos','valor','$'}.
     """
-    kws_data  = ["data"]
-    kws_custo = ["custo", "custos", "gasto", "gastos", "valor", "custo$", "custos $$"]
-
-    for idx in range(min(max_lin, len(df))):
-        linha = df.iloc[idx].tolist()
-        linha_norm = [_strip_acc_lower(x) for x in linha]
-
-        achou_data  = any("data" in cel for cel in linha_norm)
-        achou_custo = any(any(k in cel for k in kws_custo) for cel in linha_norm)
-
-        if achou_data and achou_custo:
-            return idx
-
+    kws_custo = ["custo", "custos", "gasto", "gastos", "valor", "$"]
+    n = min(len(df_txt), max_scan)
+    for i in range(n):
+        row_vals = [_strip_acc_lower(x) for x in df_txt.iloc[i].tolist()]
+        has_data  = any("data" in v for v in row_vals)
+        has_custo = any(any(k in v for k in kws_custo) for v in row_vals)
+        if has_data and has_custo:
+            return i
     return None
 
-# ------------------------------------------------------------
-# 3) PROCURA CABEÇALHO
-# ------------------------------------------------------------
-hdr = encontrar_linha_header(df_raw)
+def _parse_currency_br(series: pd.Series) -> pd.Series:
+    import re
+    s = series.astype(str)
+    s = s.str.replace("\u00A0", " ", regex=False)  # NBSP
+    s = s.str.replace("R$", "", regex=False)
+    s = s.str.replace(" ", "", regex=False)
+    s = s.str.replace(".", "", regex=False)       # milhar
+    s = s.str.replace(",", ".", regex=False)      # decimal
+    s = s.apply(lambda x: re.sub(r"[^0-9.\-]", "", x))
+    return pd.to_numeric(s, errors="coerce")
 
+# ------------------------------------------------------------
+# 3) DETECTAR LINHA DE CABEÇALHO E REDEFINIR COLUNAS
+# ------------------------------------------------------------
+hdr = _find_header_row(df_raw, max_scan=60)
 if hdr is None:
-    st.error("❌ Não achei a linha de cabeçalho contendo 'DATA' e 'CUSTOS/GASTOS/VALOR'.")
-    st.write("Primeiras colunas detectadas:", df_raw.columns.tolist())
+    st.error("❌ Não achei a linha de cabeçalho com DATA e CUSTOS na aba informada.")
     st.stop()
 
-# ------------------------------------------------------------
-# 4) REDEFINE CABEÇALHO DA TABELA
-# ------------------------------------------------------------
-# Linha de cabeçalho real:
-cabecalho = [c.strip() for c in df_raw.iloc[hdr].tolist()]
-
-# DataFrame real começa após essa linha
+header_vals = [str(x).strip() for x in df_raw.iloc[hdr].tolist()]
 dfq = df_raw.iloc[hdr+1:].copy()
-dfq.columns = cabecalho
+dfq.columns = header_vals
 
-# remove colunas com nome vazio
+# remove colunas de header vazias (nome em branco)
 dfq = dfq.loc[:, [c.strip() != "" for c in dfq.columns]]
 
 # ------------------------------------------------------------
-# 5) DETECTAR COLUNAS DE DATA E DE CUSTO
+# 4) ESCOLHER O PAR (DATA, CUSTO) DO MESMO BLOCO
+#    -> pega CUSTO e escolhe a DATA mais próxima à esquerda
 # ------------------------------------------------------------
-COL_DATA  = None
-COL_CUSTO = None
+norm_cols = [_strip_acc_lower(c) for c in dfq.columns]
+cost_idx_candidates = [i for i, nc in enumerate(norm_cols)
+                       if ("custo" in nc or "custos" in nc or "gasto" in nc or "gastos" in nc or "valor" in nc or "$" in nc)]
 
-for c in dfq.columns:
-    cn = _strip_acc_lower(c)
-    if "data" in cn:
-        COL_DATA = c
-    if any(k in cn for k in ["custo", "custos", "gasto", "gastos", "valor", "$"]):
-        COL_CUSTO = c
-
-if COL_DATA is None:
-    st.error("❌ Não encontrei a coluna de DATA.")
-    st.write("Colunas detectadas:", dfq.columns.tolist())
+if not cost_idx_candidates:
+    st.error("❌ Não encontrei nenhuma coluna de CUSTO/GASTO/VALOR.")
+    st.write("Colunas disponíveis:", list(dfq.columns))
     st.stop()
 
-if COL_CUSTO is None:
-    st.error("❌ Não encontrei a coluna de CUSTO/GASTO.")
-    st.write("Colunas detectadas:", dfq.columns.tolist())
+# usa o primeiro custo encontrado (bloco do PAC tem 'CUSTOS $$')
+cost_idx = cost_idx_candidates[0]
+COL_CUSTO = dfq.columns[cost_idx]
+
+# procurar DATA mais próxima à esquerda do custo
+data_idx_candidates = [i for i, nc in enumerate(norm_cols) if "data" in nc]
+if not data_idx_candidates:
+    st.error("❌ Não encontrei nenhuma coluna de DATA.")
+    st.write("Colunas disponíveis:", list(dfq.columns))
     st.stop()
 
+left_data_idx = [i for i in data_idx_candidates if i <= cost_idx]
+if left_data_idx:
+    data_idx = max(left_data_idx)  # a DATA mais próxima à esquerda do CUSTO
+else:
+    # fallback: a DATA mais próxima em termos de distância
+    data_idx = min(data_idx_candidates, key=lambda i: abs(i - cost_idx))
+
+COL_DATA = dfq.columns[data_idx]
+
 # ------------------------------------------------------------
-# 6) CONVERTER DATA E CUSTOS
+# 5) CONVERTER TIPOS (DATA e MOEDA)
 # ------------------------------------------------------------
-dfq[COL_DATA] = pd.to_datetime(dfq[COL_DATA], errors="coerce", dayfirst=True)
+dfq[COL_DATA]  = pd.to_datetime(dfq[COL_DATA].astype(str), errors="coerce", dayfirst=True)
+dfq[COL_CUSTO] = _parse_currency_br(dfq[COL_CUSTO])
 
-def limpar_moeda(series):
-    import re
-    s = series.astype(str)
-    s = s.str.replace("R$", "", regex=False)
-    s = s.str.replace(".", "", regex=False)
-    s = s.str.replace(",", ".", regex=False)
-    s = s.apply(lambda x: re.sub(r"[^0-9.-]", "", x))
-    return pd.to_numeric(s, errors="coerce")
-
-dfq[COL_CUSTO] = limpar_moeda(dfq[COL_CUSTO])
-
-# eliminar linhas vazias
+# limpar linhas inválidas e ordenar
 dfq = dfq.dropna(subset=[COL_DATA, COL_CUSTO]).sort_values(COL_DATA)
 
-with st.expander("🔍 Debug da Tabela"):
-    st.write("Linha de cabeçalho encontrada:", hdr)
-    st.write("Coluna de Data:", COL_DATA)
-    st.write("Coluna de Custo:", COL_CUSTO)
-    st.dataframe(dfq.tail())
+with st.expander("🔍 Debug (Carta de Custos)"):
+    st.write(f"Linha de cabeçalho detectada: {hdr}")
+    st.write("Coluna de Data:", COL_DATA, " | Coluna de Custo:", COL_CUSTO)
+    st.dataframe(dfq[[COL_DATA, COL_CUSTO]].head())
+
+if dfq.empty:
+    st.warning("Sem dados válidos após limpeza (DATA/CUSTO).")
+    st.stop()
 
 # ------------------------------------------------------------
-# 7) AGREGAÇÕES
+# 6) AGREGAÇÕES — DIÁRIA / SEMANAL (ISO) / MENSAL
 # ------------------------------------------------------------
-df_day = dfq.groupby(COL_DATA, as_index=False)[COL_CUSTO].sum()
+df_day = dfq.groupby(COL_DATA, as_index=False)[COL_CUSTO].sum().sort_values(COL_DATA)
 
 df_week = (
     dfq.assign(semana=dfq[COL_DATA].dt.to_period("W-MON"))
@@ -505,58 +506,59 @@ df_month = (
 df_month["Data"] = df_month["mes"].dt.to_timestamp()
 
 # ------------------------------------------------------------
-# 8) FUNÇÃO DA CARTA (X-barra)
+# 7) FUNÇÃO DA CARTA (X-barra)
 # ------------------------------------------------------------
 def desenhar_carta(x, y, titulo, ylabel):
     y = pd.Series(y).astype(float)
     media = y.mean()
-    desvio = y.std(ddof=1)
+    desvio = y.std(ddof=1) if len(y) > 1 else 0.0
     LSC = media + 3*desvio
     LIC = media - 3*desvio
 
-    fig, ax = plt.subplots(figsize=(12,4))
+    fig, ax = plt.subplots(figsize=(12, 4.5))
     ax.plot(x, y, marker="o", color="#1565C0")
     ax.axhline(media, color="blue", linestyle="--", label="Média")
 
     if desvio > 0:
-        ax.axhline(LSC, color="red", linestyle="--", label="LSC")
-        ax.axhline(LIC, color="red", linestyle="--", label="LIC")
+        ax.axhline(LSC, color="red", linestyle="--", label="LSC (+3σ)")
+        ax.axhline(LIC, color="red", linestyle="--", label="LIC (−3σ)")
+        acima = y > LSC
+        abaixo = y < LIC
+        ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70, zorder=3)
+        ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70, zorder=3)
 
-    ax.grid(True, alpha=0.3)
     ax.set_title(titulo)
     ax.set_ylabel(ylabel)
     ax.set_xlabel("Data")
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="best")
     st.pyplot(fig)
 
 # ------------------------------------------------------------
-# 9) MÉTRICAS
+# 8) MÉTRICAS (dia/semana/mês mais recentes)
 # ------------------------------------------------------------
 ultimo = df_day[COL_CUSTO].iloc[-1]
 
-iso = dfq[COL_DATA].dt.isocalendar()
-dfq["__sem__"] = iso.week
-dfq["__anoiso__"] = iso.year
-
+iso_week = dfq[COL_DATA].dt.isocalendar()
+dfq["__sem__"]    = iso_week.week.astype(int)
+dfq["__anoiso__"] = iso_week.year.astype(int)
 ult_sem = dfq["__sem__"].iloc[-1]
 ult_ano = dfq["__anoiso__"].iloc[-1]
-
-custo_semana = dfq[(dfq["__sem__"]==ult_sem) & (dfq["__anoiso__"]==ult_ano)][COL_CUSTO].sum()
+custo_semana = dfq[(dfq["__sem__"] == ult_sem) & (dfq["__anoiso__"] == ult_ano)][COL_CUSTO].sum()
 
 dfq["__mes__"] = dfq[COL_DATA].dt.month
 dfq["__ano__"] = dfq[COL_DATA].dt.year
-
-ult_mes = dfq["__mes__"].iloc[-1]
+ult_mes  = dfq["__mes__"].iloc[-1]
 ult_ano2 = dfq["__ano__"].iloc[-1]
+custo_mes = dfq[(dfq["__mes__"] == ult_mes) & (dfq["__ano__"] == ult_ano2)][COL_CUSTO].sum()
 
-custo_mes = dfq[(dfq["__mes__"]==ult_mes) & (dfq["__ano__"]==ult_ano2)][COL_CUSTO].sum()
-
-c1,c2,c3 = st.columns(3)
-c1.metric("Custo do Dia", f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+c1, c2, c3 = st.columns(3)
+c1.metric("Custo do Dia",    f"R$ {ultimo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 c2.metric("Custo da Semana", f"R$ {custo_semana:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-c3.metric("Custo do Mês", f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+c3.metric("Custo do Mês",    f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
 # ------------------------------------------------------------
-# 10) CARTAS
+# 9) CARTAS
 # ------------------------------------------------------------
 st.subheader("📅 Carta Diária")
 desenhar_carta(df_day[COL_DATA], df_day[COL_CUSTO], "Custo Diário (R$)", "R$")
