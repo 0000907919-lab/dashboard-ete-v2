@@ -549,4 +549,3 @@ if df_month.empty:
     st.info("Sem dados mensais.")
 else:
     desenhar_carta(df_month["Data"], df_month[COL_CUSTO], "Custo Mensal (R$)", "Custo Mensal (R$)")
-``
