@@ -5,6 +5,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
+import io, requests, re
+from matplotlib.ticker import FuncFormatter
 
 # =========================
 # CONFIGURAÇÃO DA PÁGINA
@@ -16,7 +18,7 @@ st.set_page_config(page_title="Dashboard Operacional ETE", layout="wide")
 # =========================
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
 GID_FORM = "1283870792"  # aba com o formulário operacional
-# >>> Corrigido: use &gid= (não &amp;gid=)
+# Corrigido: use &gid= (não &amp;gid=)
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_FORM}"
 
 # -------------------------
@@ -44,20 +46,18 @@ KW_CACAMBA   = ["cacamba", "caçamba"]
 KW_NITR      = ["nitr", "nitrificacao", "nitrificação"]
 KW_MBBR      = ["mbbr"]
 KW_VALVULA   = ["valvula", "válvula"]
-
-# >>> Ajuste: separar soprador de oxigenação (DO)
-KW_SOPRADOR  = ["soprador"]                         # SOMENTE sopradores (status OK/NOK)
+KW_SOPRADOR  = ["soprador"]                         # SOMENTE sopradores (status)
 KW_OXIG      = ["oxigenacao", "oxigenação"]         # Oxigenação/DO
 
 # Grupos adicionais
 KW_NIVEIS_OUTROS = ["nivel", "nível"]      # será filtrado excluindo caçamba
 KW_VAZAO         = ["vazao", "vazão"]
-KW_PH            = ["ph ", " ph"]          # espaços para evitar bater em 'oxipH' etc
+KW_PH            = ["ph ", " ph"]          # espaços p/ evitar bater em 'oxipH' etc
 KW_SST           = ["sst ", " sst", "ss "]  # inclui SS/SST
 KW_DQO           = ["dqo ", " dqo"]
 KW_ESTADOS       = ["tridecanter", "desvio", "tempo de descarte", "volante"]
 
-# >>> Exclusões genéricas para evitar poluir cartões de Sopradores/Valvulas/Oxigenação
+# Exclusões genéricas para não poluir cartões
 KW_EXCLUDE_GENERIC = KW_SST + KW_DQO + KW_PH + KW_VAZAO + KW_NIVEIS_OUTROS + KW_CACAMBA
 
 # -------------------------
@@ -112,7 +112,6 @@ def _units_from_label(label: str) -> str:
         return "%"
     return ""
 
-# >>> NOVO: helper para exigir interseção (AND) entre grupos e excluir termos proibidos
 def _filter_cols_intersection(all_cols_norm_noacc, must_any_1, must_any_2, forbid_any=None):
     kws1 = [_strip_accents(k.lower()) for k in must_any_1]
     kws2 = [_strip_accents(k.lower()) for k in must_any_2]
@@ -125,6 +124,63 @@ def _filter_cols_intersection(all_cols_norm_noacc, must_any_1, must_any_2, forbi
         if has1 and has2 and not has_forb:
             selected_norm.append(c_norm)
     return [COLMAP[c] for c in selected_norm]
+
+# =========================
+# ⚙️ PARÂMETROS DO SEMÁFORO (Sidebar)
+# =========================
+with st.sidebar.expander("⚙️ Parâmetros do Semáforo", expanded=True):
+    st.caption("Ajuste os limites; os valores abaixo são padrões comuns e podem ser adaptados.")
+    # Oxigenação (DO)
+    st.markdown("**Oxigenação (mg/L)**")
+    do_ok_min_nitr = st.number_input("Nitrificação – DO mínimo (verde)", value=2.0, step=0.1)
+    do_ok_max_nitr = st.number_input("Nitrificação – DO máximo (verde)", value=3.0, step=0.1)
+    do_warn_low_nitr  = st.number_input("Nitrificação – abaixo disso é VERMELHO", value=1.0, step=0.1)
+    do_warn_high_nitr = st.number_input("Nitrificação – acima disso é VERMELHO", value=4.0, step=0.1)
+
+    do_ok_min_mbbr = st.number_input("MBBR – DO mínimo (verde)", value=2.0, step=0.1)
+    do_ok_max_mbbr = st.number_input("MBBR – DO máximo (verde)", value=3.0, step=0.1)
+    do_warn_low_mbbr  = st.number_input("MBBR – abaixo disso é VERMELHO", value=1.0, step=0.1)
+    do_warn_high_mbbr = st.number_input("MBBR – acima disso é VERMELHO", value=4.0, step=0.1)
+
+    # pH
+    st.markdown("---")
+    st.markdown("**pH**")
+    ph_ok_min_general = st.number_input("pH geral – mínimo (verde)", value=6.5, step=0.1)
+    ph_ok_max_general = st.number_input("pH geral – máximo (verde)", value=8.5, step=0.1)
+    ph_warn_low_general  = st.number_input("pH geral – abaixo disso é VERMELHO", value=6.0, step=0.1)
+    ph_warn_high_general = st.number_input("pH geral – acima disso é VERMELHO", value=9.0, step=0.1)
+
+    ph_ok_min_mab = st.number_input("pH MAB – mínimo (verde)", value=4.5, step=0.1)
+    ph_ok_max_mab = st.number_input("pH MAB – máximo (verde)", value=6.5, step=0.1)
+    ph_warn_low_mab  = st.number_input("pH MAB – abaixo disso é VERMELHO", value=4.0, step=0.1)
+    ph_warn_high_mab = st.number_input("pH MAB – acima disso é VERMELHO", value=7.0, step=0.1)
+
+    # Qualidade do efluente
+    st.markdown("---")
+    st.markdown("**Efluente – limites (Saída)**")
+    sst_green_max = st.number_input("SST Saída – Máximo (verde) [mg/L]", value=30.0, step=1.0)
+    sst_orange_max = st.number_input("SST Saída – Máximo (laranja) [mg/L]", value=50.0, step=1.0)
+
+    dqo_green_max = st.number_input("DQO Saída – Máximo (verde) [mg/L]", value=150.0, step=10.0)
+    dqo_orange_max = st.number_input("DQO Saída – Máximo (laranja) [mg/L]", value=300.0, step=10.0)
+
+# Estrutura única com os limites atuais
+SEMAFORO_CFG = {
+    "do": {
+        "nitr": {"ok_min": do_ok_min_nitr, "ok_max": do_ok_max_nitr,
+                 "red_low": do_warn_low_nitr, "red_high": do_warn_high_nitr},
+        "mbbr": {"ok_min": do_ok_min_mbbr, "ok_max": do_ok_max_mbbr,
+                 "red_low": do_warn_low_mbbr, "red_high": do_warn_high_mbbr},
+    },
+    "ph": {
+        "general": {"ok_min": ph_ok_min_general, "ok_max": ph_ok_max_general,
+                    "red_low": ph_warn_low_general, "red_high": ph_warn_high_general},
+        "mab": {"ok_min": ph_ok_min_mab, "ok_max": ph_ok_max_mab,
+                "red_low": ph_warn_low_mab, "red_high": ph_warn_high_mab},
+    },
+    "sst_saida": {"green_max": sst_green_max, "orange_max": sst_orange_max},
+    "dqo_saida": {"green_max": dqo_green_max, "orange_max": dqo_orange_max},
+}
 
 # =========================
 # PADRONIZAÇÃO DE NOMES (TÍTULOS)
@@ -140,7 +196,6 @@ def _nome_exibicao(label_original: str) -> str:
       - "Soprador de Nitrificação X" / "Soprador de MBBR X"
       - "Oxigenação Nitrificação X" / "Oxigenação MBBR X"
       - "Válvula ..." conforme área
-      - Demais indicadores: normaliza siglas e capitalização
     """
     base_clean = _remove_brackets(label_original)
     base = _strip_accents(base_clean.lower()).strip()
@@ -174,7 +229,7 @@ def _nome_exibicao(label_original: str) -> str:
             return f"Válvula de MBBR {num}" if num else "Válvula de MBBR"
         return f"Válvula {num}" if num else "Válvula"
 
-    # Ajustes de capitalização comuns (pH, DQO, SST, Vazão, Nível, MIX)
+    # Ajustes de capitalização comuns
     txt = base_clean
     replacements = {
         "ph": "pH", "dqo": "DQO", "sst": "SST", "ss ": "SS ",
@@ -189,6 +244,78 @@ def _nome_exibicao(label_original: str) -> str:
     return txt.strip()
 
 # =========================
+# MOTOR DE SEMÁFORO (cores)
+# =========================
+COLOR_OK = "#43A047"      # verde
+COLOR_WARN = "#FB8C00"    # laranja
+COLOR_BAD = "#E53935"     # vermelho
+COLOR_NEUTRAL = "#546E7A" # cinza azulado
+COLOR_NULL = "#9E9E9E"    # cinza (sem dado)
+
+def semaforo_numeric_color(label: str, val: float):
+    """
+    Retorna cor baseada em regras por tipo (Oxigenação, pH, SST/DQO Saída, etc.)
+    Se não houver regra aplicável, retorna None (para cair no padrão antigo).
+    """
+    if val is None or np.isnan(val):
+        return COLOR_NULL
+
+    base = _strip_accents(label.lower())
+
+    # -------- Oxigenação (DO) --------
+    if "oxigenacao" in base:
+        area = "nitr" if any(k in base for k in KW_NITR) else ("mbbr" if any(k in base for k in KW_MBBR) else "nitr")
+        cfg = SEMAFORO_CFG["do"][area]
+        ok_min, ok_max = cfg["ok_min"], cfg["ok_max"]
+        red_low, red_high = cfg["red_low"], cfg["red_high"]
+        if val < red_low or val > red_high:
+            return COLOR_BAD
+        if ok_min <= val <= ok_max:
+            return COLOR_OK
+        return COLOR_WARN
+
+    # -------- pH --------
+    if re.search(r"\bph\b", base):
+        is_mab = "mab" in base
+        cfg = SEMAFORO_CFG["ph"]["mab" if is_mab else "general"]
+        ok_min, ok_max = cfg["ok_min"], cfg["ok_max"]
+        red_low, red_high = cfg["red_low"], cfg["red_high"]
+        if val < red_low or val > red_high:
+            return COLOR_BAD
+        if ok_min <= val <= ok_max:
+            return COLOR_OK
+        return COLOR_WARN
+
+    # -------- SST / SS — SAÍDA --------
+    if "sst" in base or re.search(r"\bss\b", base):
+        if "saida" in base or "saída" in label.lower():
+            cfg = SEMAFORO_CFG["sst_saida"]
+            if val <= cfg["green_max"]:
+                return COLOR_OK
+            if val <= cfg["orange_max"]:
+                return COLOR_WARN
+            return COLOR_BAD
+        else:
+            return COLOR_NEUTRAL  # internos (nitrificação/decant.) -> neutro
+
+    # -------- DQO — SAÍDA --------
+    if "dqo" in base:
+        if "saida" in base or "saída" in label.lower():
+            cfg = SEMAFORO_CFG["dqo_saida"]
+            if val <= cfg["green_max"]:
+                return COLOR_OK
+            if val <= cfg["orange_max"]:
+                return COLOR_WARN
+            return COLOR_BAD
+        else:
+            return COLOR_NEUTRAL  # internos -> neutro
+
+    # -------- Níveis (%) das caçambas mantém regra padrão 70/30 (tratado depois) --------
+
+    # Sem regra específica
+    return None
+
+# =========================
 # GAUGES (somente Caçambas)
 # =========================
 def make_speedometer(val, label):
@@ -196,7 +323,7 @@ def make_speedometer(val, label):
     if val is None or np.isnan(val):
         val = 0.0
 
-    color = "#43A047" if val >= 70 else "#FB8C00" if val >= 30 else "#E53935"
+    color = COLOR_OK if val >= 70 else COLOR_WARN if val >= 30 else COLOR_BAD
 
     return go.Indicator(
         mode="gauge+number",
@@ -236,35 +363,47 @@ def render_cacambas_gauges(title, n_cols=4):
         height=max(280 * n_rows, 280),
         margin=dict(l=10, r=10, t=10, b=10),
     )
-    # key única evita StreamlitDuplicateElementId
     st.plotly_chart(fig, use_container_width=True, key=f"plot-gauges-{_slug(title)}")
 
 # =========================
-# TILES (cards genéricos)
+# TILES (cards genéricos com semáforo)
 # =========================
 def _tile_color_and_text(raw_value, val_num, label, force_neutral_numeric=False):
-    """Define cor e texto do card conforme tipo de dado."""
+    """Define cor e texto do card conforme tipo de dado + semáforo configurável."""
     if raw_value is None:
-        return "#9E9E9E", "—"
+        return COLOR_NULL, "—"
 
+    # 1) Texto (OK/NOK etc.)
+    t = _strip_accents(str(raw_value).strip().lower())
+    if t in ["ok", "ligado", "aberto", "rodando", "on"]:
+        return COLOR_OK, str(raw_value).upper()
+    if t in ["nok", "falha", "erro", "fechado", "off"]:
+        return COLOR_BAD, str(raw_value).upper()
+
+    # 2) Numérico
     if not np.isnan(val_num):
         units = _units_from_label(label)
-        if units == "%":
-            fill = "#43A047" if val_num >= 70 else "#FB8C00" if val_num >= 30 else "#E53935"
-            return fill, f"{val_num:.1f}%"
-        else:
-            if force_neutral_numeric:
-                return "#546E7A", f"{val_num:.2f}{units}"
-            fill = "#43A047" if val_num >= 70 else "#FB8C00" if val_num >= 30 else "#E53935"
-            return fill, f"{val_num:.1f}{units}"
 
-    txt = str(raw_value).strip()
-    t = _strip_accents(txt.lower())
-    if t in ["ok", "ligado", "aberto", "rodando", "on"]:
-        return "#43A047", txt.upper()
-    if t in ["nok", "falha", "erro", "fechado", "off"]:
-        return "#E53935", txt.upper()
-    return "#FB8C00", txt
+        # Semáforo dedicado por regra
+        color_by_rule = None if force_neutral_numeric else semaforo_numeric_color(label, val_num)
+        if color_by_rule is not None:
+            # usa a regra específica
+            return color_by_rule, f"{val_num:.2f}{units}"
+
+        # Caso neutro forçado
+        if force_neutral_numeric:
+            return COLOR_NEUTRAL, f"{val_num:.2f}{units}"
+
+        # Padrão (mantém 70/30) — melhor para % (ex.: caçamba fora dos gauges)
+        if units == "%":
+            fill = COLOR_OK if val_num >= 70 else COLOR_WARN if val_num >= 30 else COLOR_BAD
+            return fill, f"{val_num:.1f}%"
+
+        # Sem regra específica → neutro
+        return COLOR_NEUTRAL, f"{val_num:.2f}{units}"
+
+    # 3) Texto que não bate com dicionário → laranja
+    return COLOR_WARN, str(raw_value)
 
 def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=False):
     cols_orig = [c for c in cols_orig if c]
@@ -320,7 +459,7 @@ def render_tiles_split(title_base, base_keywords, n_cols=4, exclude_generic=True
     _render_tiles_from_cols(f"{title_base} – MBBR", cols_mbbr, n_cols=n_cols)
 
 # -------------------------
-# Grupos adicionais ("puxar o que faltava")
+# Grupos adicionais
 # -------------------------
 def render_outros_niveis():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_NIVEIS_OUTROS)
@@ -339,19 +478,19 @@ def render_ph():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_PH)
     if not cols:
         return
-    _render_tiles_from_cols("pH", cols, n_cols=4, force_neutral_numeric=True)
+    _render_tiles_from_cols("pH", cols, n_cols=4, force_neutral_numeric=False)
 
 def render_sst():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_SST)
     if not cols:
         return
-    _render_tiles_from_cols("Sólidos (SS/SST)", cols, n_cols=4, force_neutral_numeric=True)
+    _render_tiles_from_cols("Sólidos (SS/SST)", cols, n_cols=4, force_neutral_numeric=False)
 
 def render_dqo():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_DQO)
     if not cols:
         return
-    _render_tiles_from_cols("DQO", cols, n_cols=4, force_neutral_numeric=True)
+    _render_tiles_from_cols("DQO", cols, n_cols=4, force_neutral_numeric=False)
 
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
@@ -395,7 +534,7 @@ render_tiles_split("Válvulas", KW_VALVULA)
 # Sopradores (cards) — mostrar somente SOPRADORES (sem DO)
 render_tiles_split("Sopradores", KW_SOPRADOR)
 
-# Oxigenação (cards) — DO separado dos sopradores
+# Oxigenação (cards) — DO separado dos sopradores (com semáforo pelos limites da sidebar)
 render_tiles_split("Oxigenação", KW_OXIG, n_cols=4, exclude_generic=False)
 
 # ---- Indicadores adicionais
@@ -409,9 +548,6 @@ render_estados()
 # ============================================================
 #        CARTAS DE CONTROLE — CUSTOS (R$)  [MULTI-ITEM]
 # ============================================================
-import io, requests
-from matplotlib.ticker import FuncFormatter
-
 st.markdown("---")
 st.header("🔴 Cartas de Controle — Custo (R$)")
 
@@ -419,22 +555,15 @@ st.header("🔴 Cartas de Controle — Custo (R$)")
 with st.sidebar:
     gid_input = st.text_input("GID da aba de gastos", value="668859455")
 CC_GID_GASTOS = gid_input.strip() or "668859455"
-# >>> Corrigido: use &gid=
+# Corrigido: use &gid=
 CC_URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={CC_GID_GASTOS}"
 
 # Botão de recarregar (útil no Cloud)
 if st.button("🔄 Recarregar cartas"):
     st.rerun()
 
-# ------------------------------------------------------------
-# 1) LOADER com timeout + cache
-# ------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def cc_baixar_csv_bruto(url: str, timeout: int = 20) -> pd.DataFrame:
-    """
-    Baixa o CSV via requests (com timeout) e entrega como DataFrame sem header.
-    Mantém tudo como texto para não perder linhas/títulos.
-    """
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     buf = io.StringIO(resp.text)
@@ -449,10 +578,6 @@ def cc_strip_acc_lower(s: str) -> str:
     return s.lower().strip()
 
 def cc_find_header_row(df_txt: pd.DataFrame, max_scan: int = 120) -> int | None:
-    """
-    Acha a linha do cabeçalho: deve conter 'data' E algum de
-    {'custo','custos','gasto','gastos','valor','$'}.
-    """
     kws_custo = ["custo", "custos", "gasto", "gastos", "valor", "$"]
     n = min(len(df_txt), max_scan)
     for i in range(n):
@@ -464,7 +589,6 @@ def cc_find_header_row(df_txt: pd.DataFrame, max_scan: int = 120) -> int | None:
     return None
 
 def cc_parse_currency_br(series: pd.Series) -> pd.Series:
-    import re
     s = series.astype(str)
     s = s.str.replace("\u00A0", " ", regex=False)  # NBSP
     s = s.str.replace("R$", "", regex=False)
@@ -475,10 +599,6 @@ def cc_parse_currency_br(series: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 def cc_guess_item_label(df_txt: pd.DataFrame, header_row: int, col_idx: int, fallback: str) -> str:
-    """
-    Nome do item olhando a linha ANTERIOR ao cabeçalho no mesmo bloco.
-    Se vazio, tenta à esquerda. Cai no fallback se nada achar.
-    """
     label = ""
     if header_row - 1 >= 0:
         try:
@@ -501,9 +621,6 @@ def cc_guess_item_label(df_txt: pd.DataFrame, header_row: int, col_idx: int, fal
         label = label[:77] + "..."
     return label
 
-# ------------------------------------------------------------
-# 2) Baixar CSV + parse do cabeçalho (com feedback)
-# ------------------------------------------------------------
 with st.status("Carregando dados das cartas...", expanded=True) as status:
     try:
         st.write("• Baixando CSV do Google Sheets…")
@@ -519,7 +636,6 @@ with st.status("Carregando dados das cartas...", expanded=True) as status:
         cc_header_vals = [str(x).strip() for x in cc_df_raw.iloc[cc_hdr].tolist()]
         cc_df_all = cc_df_raw.iloc[cc_hdr + 1:].copy()
         cc_df_all.columns = cc_header_vals
-        # remove colunas com nome vazio
         cc_df_all = cc_df_all.loc[:, [c.strip() != "" for c in cc_df_all.columns]]
 
         status.update(label="Dados carregados com sucesso ✅", state="complete")
@@ -533,11 +649,7 @@ with st.status("Carregando dados das cartas...", expanded=True) as status:
         st.error(f"❌ Erro inesperado ao preparar dados: {e}")
         st.stop()
 
-# ------------------------------------------------------------
-# 3) Identificar todos os ITENS (pares DATA + CUSTO do mesmo bloco)
-# ------------------------------------------------------------
 cc_norm_cols = [cc_strip_acc_lower(c) for c in cc_df_all.columns]
-
 CC_KW_COST_INCLUDE = ["custo", "custos", "gasto", "gastos", "valor", "$"]
 CC_KW_COST_EXCLUDE = ["media", "média", "status", "automatic", "automatico", "automático", "meta"]
 
@@ -563,8 +675,6 @@ cc_seen_labels = set()
 
 for cost_idx in cc_cost_idx_list:
     cost_name = cc_df_all.columns[cost_idx]
-
-    # DATA mais próxima à esquerda; se não houver, a mais próxima absoluta
     left_data = [i for i in cc_data_idx_list if i <= cost_idx]
     if left_data:
         data_idx = max(left_data)
@@ -572,7 +682,6 @@ for cost_idx in cc_cost_idx_list:
         data_idx = min(cc_data_idx_list, key=lambda i: abs(i - cost_idx))
     data_name = cc_df_all.columns[data_idx]
 
-    # monta DF do item (seleção por POSIÇÃO evita 'duplicate keys')
     df_item = pd.DataFrame({
         "DATA": pd.to_datetime(cc_df_all.iloc[:, data_idx].astype(str), errors="coerce", dayfirst=True),
         "CUSTO": cc_parse_currency_br(cc_df_all.iloc[:, cost_idx]),
@@ -581,10 +690,7 @@ for cost_idx in cc_cost_idx_list:
     if df_item.empty:
         continue
 
-    # rótulo do item olhando a linha acima (fallback no nome do custo)
     label_guess = cc_guess_item_label(cc_df_raw, cc_hdr, cost_idx, fallback=cost_name)
-
-    # DEDUPLICAÇÃO por rótulo
     label_norm = cc_strip_acc_lower(label_guess)
     if label_norm in cc_seen_labels:
         continue
@@ -610,9 +716,6 @@ if not cc_items:
         st.dataframe(df_debug)
     st.stop()
 
-# ------------------------------------------------------------
-# 4) UI — filtro de itens e rótulos
-# ------------------------------------------------------------
 cc_labels_all = [it["label"] for it in cc_items]
 cc_sel_labels = st.multiselect("Itens para exibir nas cartas", cc_labels_all, default=cc_labels_all)
 cc_mostrar_rotulos = st.checkbox("Mostrar rótulos de dados nas cartas", value=True)
@@ -622,9 +725,6 @@ if not cc_items:
     st.info("Selecione pelo menos um item para visualizar.")
     st.stop()
 
-# ------------------------------------------------------------
-# 5) Funções de carta e métricas
-# ------------------------------------------------------------
 def cc_fmt_brl(v, pos=None):
     try:
         return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
@@ -703,16 +803,11 @@ def cc_metricas_item(df_item: pd.DataFrame):
 
     return ultimo, custo_semana, custo_mes
 
-# ------------------------------------------------------------
-# 6) Uma aba por item
-# ------------------------------------------------------------
 cc_tabs = st.tabs([it["label"] for it in cc_items])
-
 for tab, it in zip(cc_tabs, cc_items):
     with tab:
         df_item = it["df"]
 
-        # Métricas
         ultimo, custo_semana, custo_mes = cc_metricas_item(df_item)
         c1, c2, c3 = st.columns(3)
         c1.metric("Custo do Dia",
@@ -722,7 +817,6 @@ for tab, it in zip(cc_tabs, cc_items):
         c3.metric("Custo do Mês",
                   f"R$ {custo_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-        # Agregações
         df_day = df_item.groupby("DATA", as_index=False)["CUSTO"].sum().sort_values("DATA")
 
         df_week = (
@@ -737,7 +831,6 @@ for tab, it in zip(cc_tabs, cc_items):
         )
         df_month["Data"] = df_month["mes"].dt.to_timestamp()
 
-        # Cartas
         st.subheader("📅 Carta Diária")
         cc_desenhar_carta(df_day["DATA"], df_day["CUSTO"],
                           f"Custo Diário (R$) — {it['label']}", "R$", mostrar_rotulos=cc_mostrar_rotulos)
@@ -750,7 +843,6 @@ for tab, it in zip(cc_tabs, cc_items):
         cc_desenhar_carta(df_month["Data"], df_month["CUSTO"],
                           f"Custo Mensal (R$) — {it['label']}", "R$", mostrar_rotulos=cc_mostrar_rotulos)
 
-        # Debug do item
         with st.expander("🔍 Debug do item"):
             st.write("Coluna de DATA original:", it["data_name"], " | índice:", it["data_idx"])
             st.write("Coluna de CUSTO original:", it["cost_name"], " | índice:", it["cost_idx"])
@@ -759,17 +851,11 @@ for tab, it in zip(cc_tabs, cc_items):
 # ------------------------------------------------------------
 # 7) RESUMO TEXTO — Sopradores (para WhatsApp/Relatório)
 # ------------------------------------------------------------
-import re
-
 def _col_matches_any(cnorm: str, kws):
     kws_norm = [_strip_accents(k.lower()) for k in kws]
     return any(k in cnorm for k in kws_norm)
 
 def _select_soprador_cols(df_cols_norm, area_keywords):
-    """
-    Seleciona SOMENTE colunas de soprador para a área informada (MBBR ou Nitrificação),
-    excluindo DO/oxigenação, SST/SS/DQO/pH, vazões, níveis e caçambas.
-    """
     sel = []
     for c_norm in df_cols_norm:
         has_soprador = "soprador" in c_norm
@@ -777,13 +863,9 @@ def _select_soprador_cols(df_cols_norm, area_keywords):
         has_excluded = _col_matches_any(c_norm, KW_EXCLUDE_GENERIC + KW_OXIG)
         if has_soprador and has_area and not has_excluded:
             sel.append(c_norm)
-    # devolve nomes ORIGINAIS
     return [COLMAP[c] for c in sel]
 
 def _parse_status_ok_nok(raw):
-    """
-    Normaliza o último valor para OK/NOK.
-    """
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
         return "—"
     t = _strip_accents(str(raw).strip().lower())
@@ -797,10 +879,7 @@ def _extract_first_int(text: str) -> int | None:
     m = re.search(r"\d+", _strip_accents(text.lower()))
     return int(m.group()) if m else None
 
-def _coletar_status_area(df, area_nome: str, area_keywords):
-    """
-    Retorna lista ["1 (OK)", "2 (NOK)", ...] ordenada por número.
-    """
+def _coletar_status_area(df, area_keywords):
     cols_area = _select_soprador_cols(cols_lower_noacc, area_keywords)
     itens = []
     for col in cols_area:
@@ -809,16 +888,12 @@ def _coletar_status_area(df, area_nome: str, area_keywords):
         stt = _parse_status_ok_nok(raw)
         itens.append((num, stt, col))
     itens.sort(key=lambda x: (9999 if x[0] is None else x[0], _strip_accents(x[2].lower())))
-    pares = []
-    for num, stt, _ in itens:
-        if num is not None:
-            pares.append(f"{num} ({stt})")
+    pares = [f"{num} ({stt})" for num, stt, _ in itens if num is not None]
     return pares
 
 def gerar_resumo_sopradores(df):
-    mbbr_linha = _coletar_status_area(df, "MBBR", KW_MBBR)
-    nitr_linha = _coletar_status_area(df, "Nitrificação", KW_NITR)
-
+    mbbr_linha = _coletar_status_area(df, KW_MBBR)
+    nitr_linha = _coletar_status_area(df, KW_NITR)
     linhas = []
     linhas.append("Sopradores MBBR:")
     linhas.append(" ".join(mbbr_linha) if mbbr_linha else "—")
