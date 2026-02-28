@@ -164,7 +164,6 @@ with st.sidebar.expander("⚙️ Parâmetros do Semáforo", expanded=True):
     dqo_green_max = st.number_input("DQO Saída – Máximo (verde) [mg/L]", value=150.0, step=10.0)
     dqo_orange_max = st.number_input("DQO Saída – Máximo (laranja) [mg/L]", value=300.0, step=10.0)
 
-# Estrutura única com os limites atuais
 SEMAFORO_CFG = {
     "do": {
         "nitr": {"ok_min": do_ok_min_nitr, "ok_max": do_ok_max_nitr,
@@ -181,6 +180,19 @@ SEMAFORO_CFG = {
     "sst_saida": {"green_max": sst_green_max, "orange_max": sst_orange_max},
     "dqo_saida": {"green_max": dqo_green_max, "orange_max": dqo_orange_max},
 }
+
+# =========================
+# CONTROLES VISUAIS DOS RÓTULOS (Sidebar)
+# =========================
+with st.sidebar.expander("📝 Rótulos das Cartas (visual)", expanded=False):
+    cc_lbl_max_points = st.slider("Máximo de rótulos por carta", min_value=0, max_value=60, value=20, step=2)
+    cc_lbl_out_of_control = st.checkbox("Rotular pontos fora de controle (LSC/LIC)", value=True)
+    cc_lbl_local_extremes = st.checkbox("Rotular extremos locais (máx/mín)", value=True)
+    cc_lbl_show_first_last = st.checkbox("Rotular 1º e último ponto", value=True)
+    cc_lbl_compact_format = st.checkbox("Formatação compacta (mil/mi)", value=True)
+    cc_lbl_fontsize = st.slider("Tamanho da fonte do rótulo", min_value=6, max_value=14, value=8)
+    cc_lbl_angle = st.slider("Ângulo do rótulo (graus)", min_value=-90, max_value=90, value=0)
+    cc_lbl_bbox = st.checkbox("Fundo no rótulo (melhora leitura)", value=True)
 
 # =========================
 # PADRONIZAÇÃO DE NOMES (TÍTULOS)
@@ -296,7 +308,7 @@ def semaforo_numeric_color(label: str, val: float):
                 return COLOR_WARN
             return COLOR_BAD
         else:
-            return COLOR_NEUTRAL  # internos (nitrificação/decant.) -> neutro
+            return COLOR_NEUTRAL  # internos -> neutro
 
     # -------- DQO — SAÍDA --------
     if "dqo" in base:
@@ -309,8 +321,6 @@ def semaforo_numeric_color(label: str, val: float):
             return COLOR_BAD
         else:
             return COLOR_NEUTRAL  # internos -> neutro
-
-    # -------- Níveis (%) das caçambas mantém regra padrão 70/30 (tratado depois) --------
 
     # Sem regra específica
     return None
@@ -387,7 +397,6 @@ def _tile_color_and_text(raw_value, val_num, label, force_neutral_numeric=False)
         # Semáforo dedicado por regra
         color_by_rule = None if force_neutral_numeric else semaforo_numeric_color(label, val_num)
         if color_by_rule is not None:
-            # usa a regra específica
             return color_by_rule, f"{val_num:.2f}{units}"
 
         # Caso neutro forçado
@@ -520,7 +529,170 @@ def header_info():
     col2.metric("Registros", f"{len(df)} linhas")
 
 # =========================
-# DASHBOARD
+# CARTAS — Funções (rótulos inteligentes)
+# =========================
+def cc_fmt_brl(v, pos=None):
+    try:
+        return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return v
+
+def cc_fmt_brl_compacto(v: float) -> str:
+    """Formata R$ de forma compacta (1.200 -> 1,2 mil; 1.200.000 -> 1,2 mi)."""
+    try:
+        n = float(v)
+    except:
+        return str(v)
+    sinal = "-" if n < 0 else ""
+    n = abs(n)
+    if n >= 1_000_000:
+        return f"{sinal}R$ {n/1_000_000:.1f} mi".replace(".", ",")
+    if n >= 1_000:
+        return f"{sinal}R$ {n/1_000:.1f} mil".replace(".", ",")
+    return (sinal + "R$ " + f"{n:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
+
+def _indices_extremos_locais(y: pd.Series) -> set[int]:
+    """Encontra picos e vales simples (comparando com vizinhos imediatos)."""
+    idxs = set()
+    ys = y.reset_index(drop=True)
+    for i in range(1, len(ys)-1):
+        if pd.isna(ys[i-1]) or pd.isna(ys[i]) or pd.isna(ys[i+1]):
+            continue
+        # pico
+        if ys[i] > ys[i-1] and ys[i] > ys[i+1]:
+            idxs.add(y.index[i])
+        # vale
+        if ys[i] < ys[i-1] and ys[i] < ys[i+1]:
+            idxs.add(y.index[i])
+    return idxs
+
+def _selecionar_indices_para_rotulo(x: pd.Series, y: pd.Series,
+                                    LSC: float, LIC: float,
+                                    max_labels: int,
+                                    incluir_oor: bool,
+                                    incluir_extremos: bool,
+                                    incluir_primeiro_ultimo: bool) -> list[int]:
+    """
+    Seleciona índices a rotular priorizando:
+      1) OOR (out-of-range: > LSC ou < LIC)
+      2) Extremos locais
+      3) Primeiro e último
+      4) Preenche com últimos N restantes (mais recentes)
+    """
+    candidatos = []
+    y_clean = y.dropna()
+    if y_clean.empty or max_labels <= 0:
+        return []
+
+    # 1) Fora de controle
+    if incluir_oor:
+        oor_idx = y[(y > LSC) | (y < LIC)].dropna().index.tolist()
+        candidatos.extend(oor_idx)
+
+    # 2) Extremos locais
+    if incluir_extremos:
+        extremos = list(_indices_extremos_locais(y))
+        candidatos.extend(extremos)
+
+    # 3) Primeiro e último
+    if incluir_primeiro_ultimo:
+        candidatos.extend([y_clean.index[0], y_clean.index[-1]])
+
+    # Remove duplicados preservando ordem
+    seen = set()
+    candidatos = [i for i in candidatos if (not (i in seen) and not seen.add(i))]
+
+    # 4) Caso falte preencher até max_labels: pega os mais recentes
+    if len(candidatos) < max_labels:
+        faltam = max_labels - len(candidatos)
+        resto = [idx for idx in y.index.tolist() if (idx not in candidatos) and pd.notna(y.loc[idx])]
+        resto = resto[-faltam:]  # últimos
+        candidatos.extend(resto)
+
+    return sorted(set(candidatos), key=lambda i: x.loc[i])
+
+def cc_desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
+    """
+    Carta de controle com rótulos inteligentes (sem poluição visual).
+    Usa controles da sidebar:
+      cc_lbl_max_points, cc_lbl_out_of_control, cc_lbl_local_extremes,
+      cc_lbl_show_first_last, cc_lbl_compact_format, cc_lbl_fontsize,
+      cc_lbl_angle, cc_lbl_bbox
+    """
+    # Série como float
+    y = pd.Series(y).astype(float)
+    # Remove NaN para estatística
+    y_stats = y.dropna()
+    media = y_stats.mean() if not y_stats.empty else 0.0
+    desvio = y_stats.std(ddof=1) if len(y_stats) > 1 else 0.0
+    LSC = media + 3*desvio
+    LIC = media - 3*desvio
+
+    fig, ax = plt.subplots(figsize=(12, 4.8))
+
+    # Série
+    ax.plot(x, y, marker="o", color="#1565C0", label="Série", linewidth=2, markersize=5)
+
+    # Linhas de média/controle
+    ax.axhline(media, color="#1565C0", linestyle="--", label="Média")
+    if desvio > 0:
+        ax.axhline(LSC, color="red", linestyle="--", label="LSC (+3σ)")
+        ax.axhline(LIC, color="red", linestyle="--", label="LIC (−3σ)")
+
+    # Formatação do eixo Y em R$
+    ax.yaxis.set_major_formatter(FuncFormatter(cc_fmt_brl))
+
+    # Rótulos inteligentes
+    if mostrar_rotulos and len(y_stats) > 0:
+        idx_rotulos = _selecionar_indices_para_rotulo(
+            x=pd.Series(x),
+            y=y,
+            LSC=LSC, LIC=LIC,
+            max_labels=cc_lbl_max_points,
+            incluir_oor=cc_lbl_out_of_control,
+            incluir_extremos=cc_lbl_local_extremes,
+            incluir_primeiro_ultimo=cc_lbl_show_first_last,
+        )
+
+        def _fmt(v):
+            if cc_lbl_compact_format:
+                return cc_fmt_brl_compacto(v)
+            else:
+                return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
+
+        offsets = []
+        base_offset = 8  # px
+        for k, _ in enumerate(idx_rotulos):
+            sign = 1 if (k % 2 == 0) else -1
+            step = base_offset + 2 * (k // 4)
+            offsets.append(sign * step)
+
+        bbox = dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.7) if cc_lbl_bbox else None
+
+        for (idx, dy) in zip(idx_rotulos, offsets):
+            if pd.isna(y.loc[idx]):
+                continue
+            ax.annotate(
+                _fmt(y.loc[idx]),
+                (x.loc[idx], y.loc[idx]),
+                textcoords="offset points",
+                xytext=(0, dy),
+                ha="center",
+                fontsize=cc_lbl_fontsize,
+                rotation=cc_lbl_angle,
+                bbox=bbox,
+                color="#0D47A1",
+            )
+
+    ax.set_title(titulo)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("Data")
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend(loc="best", frameon=True)
+    st.pyplot(fig)
+
+# =========================
+# DASHBOARD (seções)
 # =========================
 st.title("Dashboard Operacional ETE")
 header_info()
@@ -724,53 +896,6 @@ cc_items = [it for it in cc_items if it["label"] in cc_sel_labels]
 if not cc_items:
     st.info("Selecione pelo menos um item para visualizar.")
     st.stop()
-
-def cc_fmt_brl(v, pos=None):
-    try:
-        return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return v
-
-def cc_desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
-    y = pd.Series(y).astype(float)
-    media = y.mean()
-    desvio = y.std(ddof=1) if len(y) > 1 else 0.0
-    LSC = media + 3*desvio
-    LIC = media - 3*desvio
-
-    fig, ax = plt.subplots(figsize=(12, 4.8))
-    ax.plot(x, y, marker="o", color="#1565C0", label="Série")
-    ax.axhline(media, color="blue", linestyle="--", label="Média")
-
-    if desvio > 0:
-        ax.axhline(LSC, color="red", linestyle="--", label="LSC (+3σ)")
-        ax.axhline(LIC, color="red", linestyle="--", label="LIC (−3σ)")
-        acima = y > LSC
-        abaixo = y < LIC
-        ax.scatter(pd.Series(x)[acima], y[acima], color="red", marker="^", s=70, zorder=3)
-        ax.scatter(pd.Series(x)[abaixo], y[abaixo], color="red", marker="v", s=70, zorder=3)
-
-    ax.yaxis.set_major_formatter(FuncFormatter(cc_fmt_brl))
-
-    if mostrar_rotulos:
-        for xi, yi in zip(x, y):
-            if pd.notna(yi):
-                ax.annotate(
-                    ("R$ " + f"{yi:,.0f}").replace(",", "X").replace(".", ",").replace("X", "."),
-                    (xi, yi),
-                    textcoords="offset points",
-                    xytext=(0, 6),
-                    ha="center",
-                    fontsize=8,
-                    color="#1565C0",
-                )
-
-    ax.set_title(titulo)
-    ax.set_ylabel(ylabel)
-    ax.set_xlabel("Data")
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(loc="best")
-    st.pyplot(fig)
 
 def cc_ultimo_valido_positivo(ser: pd.Series) -> float:
     s = pd.to_numeric(ser, errors="coerce")
