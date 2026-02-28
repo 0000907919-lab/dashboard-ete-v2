@@ -16,6 +16,7 @@ st.set_page_config(page_title="Dashboard Operacional ETE", layout="wide")
 # =========================
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
 GID_FORM = "1283870792"  # aba com o formulário operacional
+# >>> Corrigido: use &gid= (não &amp;gid=)
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_FORM}"
 
 # -------------------------
@@ -43,7 +44,10 @@ KW_CACAMBA   = ["cacamba", "caçamba"]
 KW_NITR      = ["nitr", "nitrificacao", "nitrificação"]
 KW_MBBR      = ["mbbr"]
 KW_VALVULA   = ["valvula", "válvula"]
-KW_SOPRADOR  = ["soprador", "oxigenacao", "oxigenação"]
+
+# >>> Ajuste: separar soprador de oxigenação (DO)
+KW_SOPRADOR  = ["soprador"]                         # SOMENTE sopradores (status OK/NOK)
+KW_OXIG      = ["oxigenacao", "oxigenação"]         # Oxigenação/DO
 
 # Grupos adicionais
 KW_NIVEIS_OUTROS = ["nivel", "nível"]      # será filtrado excluindo caçamba
@@ -52,6 +56,9 @@ KW_PH            = ["ph ", " ph"]          # espaços para evitar bater em 'oxip
 KW_SST           = ["sst ", " sst", "ss "]  # inclui SS/SST
 KW_DQO           = ["dqo ", " dqo"]
 KW_ESTADOS       = ["tridecanter", "desvio", "tempo de descarte", "volante"]
+
+# >>> Exclusões genéricas para evitar poluir cartões de Sopradores/Valvulas/Oxigenação
+KW_EXCLUDE_GENERIC = KW_SST + KW_DQO + KW_PH + KW_VAZAO + KW_NIVEIS_OUTROS + KW_CACAMBA
 
 # -------------------------
 # Conversões e utilidades
@@ -105,6 +112,20 @@ def _units_from_label(label: str) -> str:
         return "%"
     return ""
 
+# >>> NOVO: helper para exigir interseção (AND) entre grupos e excluir termos proibidos
+def _filter_cols_intersection(all_cols_norm_noacc, must_any_1, must_any_2, forbid_any=None):
+    kws1 = [_strip_accents(k.lower()) for k in must_any_1]
+    kws2 = [_strip_accents(k.lower()) for k in must_any_2]
+    forb = [_strip_accents(k.lower()) for k in (forbid_any or [])]
+    selected_norm = []
+    for c_norm in all_cols_norm_noacc:
+        has1 = any(k in c_norm for k in kws1)
+        has2 = any(k in c_norm for k in kws2)
+        has_forb = any(k in c_norm for k in forb)
+        if has1 and has2 and not has_forb:
+            selected_norm.append(c_norm)
+    return [COLMAP[c] for c in selected_norm]
+
 # =========================
 # PADRONIZAÇÃO DE NOMES (TÍTULOS)
 # =========================
@@ -116,9 +137,10 @@ def _nome_exibicao(label_original: str) -> str:
     """
     Padroniza nomes para:
       - "Nível da caçamba X"
-      - "Soprador de nitrificação X" / "Soprador de MBBR X"
-      - "Válvula de nitrificação X" / "Válvula de MBBR X"
-      - Demais indicadores: remove colchetes e devolve texto limpo
+      - "Soprador de Nitrificação X" / "Soprador de MBBR X"
+      - "Oxigenação Nitrificação X" / "Oxigenação MBBR X"
+      - "Válvula ..." conforme área
+      - Demais indicadores: normaliza siglas e capitalização
     """
     base_clean = _remove_brackets(label_original)
     base = _strip_accents(base_clean.lower()).strip()
@@ -128,10 +150,18 @@ def _nome_exibicao(label_original: str) -> str:
     if "cacamba" in base:
         return f"Nível da caçamba {num}" if num else "Nível da caçamba"
 
-    # Sopradores (inclui Oxigenação)
-    if ("soprador" in base) or ("oxigenacao" in base):
+    # Oxigenação (DO) — NÃO chamar de "Soprador"
+    if "oxigenacao" in base:
         if any(k in base for k in KW_NITR):
-            return f"Soprador de nitrificação {num}" if num else "Soprador de nitrificação"
+            return f"Oxigenação Nitrificação {num}".strip()
+        if any(k in base for k in KW_MBBR):
+            return f"Oxigenação MBBR {num}".strip()
+        return f"Oxigenação {num}".strip()
+
+    # Sopradores (status)
+    if "soprador" in base:
+        if any(k in base for k in KW_NITR):
+            return f"Soprador de Nitrificação {num}" if num else "Soprador de Nitrificação"
         if any(k in base for k in KW_MBBR):
             return f"Soprador de MBBR {num}" if num else "Soprador de MBBR"
         return f"Soprador {num}" if num else "Soprador"
@@ -139,7 +169,7 @@ def _nome_exibicao(label_original: str) -> str:
     # Válvulas
     if "valvula" in base:
         if any(k in base for k in KW_NITR):
-            return f"Válvula de nitrificação {num}" if num else "Válvula de nitrificação"
+            return f"Válvula de Nitrificação {num}" if num else "Válvula de Nitrificação"
         if any(k in base for k in KW_MBBR):
             return f"Válvula de MBBR {num}" if num else "Válvula de MBBR"
         return f"Válvula {num}" if num else "Válvula"
@@ -274,16 +304,19 @@ def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=Fa
     st.subheader(title)
     st.plotly_chart(fig, use_container_width=True, key=f"plot-tiles-{_slug(title)}")
 
-def render_tiles_split(title_base, base_keywords, n_cols=4):
-    """Cards: Nitrificação e MBBR para Válvulas/Sopradores."""
-    # Nitrificação
-    cols_nitr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_NITR)
-    cols_nitr = [c for c in cols_nitr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
+def render_tiles_split(title_base, base_keywords, n_cols=4, exclude_generic=True):
+    """Cards: Nitrificação e MBBR para Válvulas/Sopradores/Oxigenação — com interseção e exclusão."""
+    excl = KW_EXCLUDE_GENERIC if exclude_generic else []
+    # Nitrificação = (base_keywords) AND (KW_NITR)
+    cols_nitr = _filter_cols_intersection(
+        cols_lower_noacc, must_any_1=base_keywords, must_any_2=KW_NITR, forbid_any=excl
+    )
     _render_tiles_from_cols(f"{title_base} – Nitrificação", cols_nitr, n_cols=n_cols)
 
-    # MBBR
-    cols_mbbr = _filter_columns_by_keywords(cols_lower_noacc, base_keywords + KW_MBBR)
-    cols_mbbr = [c for c in cols_mbbr if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
+    # MBBR = (base_keywords) AND (KW_MBBR)
+    cols_mbbr = _filter_cols_intersection(
+        cols_lower_noacc, must_any_1=base_keywords, must_any_2=KW_MBBR, forbid_any=excl
+    )
     _render_tiles_from_cols(f"{title_base} – MBBR", cols_mbbr, n_cols=n_cols)
 
 # -------------------------
@@ -348,7 +381,7 @@ def header_info():
     col2.metric("Registros", f"{len(df)} linhas")
 
 # =========================
-# DASHBOARD (como estava)
+# DASHBOARD
 # =========================
 st.title("Dashboard Operacional ETE")
 header_info()
@@ -359,8 +392,11 @@ render_cacambas_gauges("Caçambas")
 # Válvulas (cards) — Nitrificação e MBBR
 render_tiles_split("Válvulas", KW_VALVULA)
 
-# Sopradores (cards) — Nitrificação e MBBR
+# Sopradores (cards) — mostrar somente SOPRADORES (sem DO)
 render_tiles_split("Sopradores", KW_SOPRADOR)
+
+# Oxigenação (cards) — DO separado dos sopradores
+render_tiles_split("Oxigenação", KW_OXIG, n_cols=4, exclude_generic=False)
 
 # ---- Indicadores adicionais
 render_outros_niveis()
@@ -369,14 +405,9 @@ render_ph()
 render_sst()
 render_dqo()
 render_estados()
+
 # ============================================================
 #        CARTAS DE CONTROLE — CUSTOS (R$)  [MULTI-ITEM]
-#        • Timeout + cache no download
-#        • Detecção de cabeçalho robusta
-#        • Uma aba por item (PAC, Ácido, etc.)
-#        • Rótulos de dados + eixo em R$
-#        • Métricas com último valor válido (> 0)
-#        • Filtro anti-duplicados (ignora Média/Status/Meta)
 # ============================================================
 import io, requests
 from matplotlib.ticker import FuncFormatter
@@ -388,6 +419,7 @@ st.header("🔴 Cartas de Controle — Custo (R$)")
 with st.sidebar:
     gid_input = st.text_input("GID da aba de gastos", value="668859455")
 CC_GID_GASTOS = gid_input.strip() or "668859455"
+# >>> Corrigido: use &gid=
 CC_URL_GASTOS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={CC_GID_GASTOS}"
 
 # Botão de recarregar (útil no Cloud)
@@ -503,8 +535,6 @@ with st.status("Carregando dados das cartas...", expanded=True) as status:
 
 # ------------------------------------------------------------
 # 3) Identificar todos os ITENS (pares DATA + CUSTO do mesmo bloco)
-#    • filtra columns de custo válidas (exclui média, status, meta etc.)
-#    • deduplica por rótulo do item
 # ------------------------------------------------------------
 cc_norm_cols = [cc_strip_acc_lower(c) for c in cc_df_all.columns]
 
@@ -725,3 +755,79 @@ for tab, it in zip(cc_tabs, cc_items):
             st.write("Coluna de DATA original:", it["data_name"], " | índice:", it["data_idx"])
             st.write("Coluna de CUSTO original:", it["cost_name"], " | índice:", it["cost_idx"])
             st.dataframe(df_item.head(10))
+
+# ------------------------------------------------------------
+# 7) RESUMO TEXTO — Sopradores (para WhatsApp/Relatório)
+# ------------------------------------------------------------
+import re
+
+def _col_matches_any(cnorm: str, kws):
+    kws_norm = [_strip_accents(k.lower()) for k in kws]
+    return any(k in cnorm for k in kws_norm)
+
+def _select_soprador_cols(df_cols_norm, area_keywords):
+    """
+    Seleciona SOMENTE colunas de soprador para a área informada (MBBR ou Nitrificação),
+    excluindo DO/oxigenação, SST/SS/DQO/pH, vazões, níveis e caçambas.
+    """
+    sel = []
+    for c_norm in df_cols_norm:
+        has_soprador = "soprador" in c_norm
+        has_area = _col_matches_any(c_norm, area_keywords)
+        has_excluded = _col_matches_any(c_norm, KW_EXCLUDE_GENERIC + KW_OXIG)
+        if has_soprador and has_area and not has_excluded:
+            sel.append(c_norm)
+    # devolve nomes ORIGINAIS
+    return [COLMAP[c] for c in sel]
+
+def _parse_status_ok_nok(raw):
+    """
+    Normaliza o último valor para OK/NOK.
+    """
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return "—"
+    t = _strip_accents(str(raw).strip().lower())
+    if t in ["ok", "ligado", "aberto", "rodando", "on"]:
+        return "OK"
+    if t in ["nok", "falha", "erro", "fechado", "off"]:
+        return "NOK"
+    return "—"
+
+def _extract_first_int(text: str) -> int | None:
+    m = re.search(r"\d+", _strip_accents(text.lower()))
+    return int(m.group()) if m else None
+
+def _coletar_status_area(df, area_nome: str, area_keywords):
+    """
+    Retorna lista ["1 (OK)", "2 (NOK)", ...] ordenada por número.
+    """
+    cols_area = _select_soprador_cols(cols_lower_noacc, area_keywords)
+    itens = []
+    for col in cols_area:
+        num = _extract_first_int(col)
+        raw = last_valid_raw(df, col)
+        stt = _parse_status_ok_nok(raw)
+        itens.append((num, stt, col))
+    itens.sort(key=lambda x: (9999 if x[0] is None else x[0], _strip_accents(x[2].lower())))
+    pares = []
+    for num, stt, _ in itens:
+        if num is not None:
+            pares.append(f"{num} ({stt})")
+    return pares
+
+def gerar_resumo_sopradores(df):
+    mbbr_linha = _coletar_status_area(df, "MBBR", KW_MBBR)
+    nitr_linha = _coletar_status_area(df, "Nitrificação", KW_NITR)
+
+    linhas = []
+    linhas.append("Sopradores MBBR:")
+    linhas.append(" ".join(mbbr_linha) if mbbr_linha else "—")
+    linhas.append("Sopradores Nitrificação:")
+    linhas.append(" ".join(nitr_linha) if nitr_linha else "—")
+    return "\n".join(linhas)
+
+st.markdown("---")
+st.subheader("🧾 Resumo — Sopradores (copiar e colar)")
+texto_resumo = gerar_resumo_sopradores(df)
+st.text_area("Texto", value=texto_resumo, height=110, label_visibility="collapsed")
+st.caption("Selecione e copie o texto acima (Ctrl+C / Cmd+C) para colar no WhatsApp/relatório.")
