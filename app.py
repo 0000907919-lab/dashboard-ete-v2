@@ -18,7 +18,7 @@ st.set_page_config(page_title="Dashboard Operacional ETE", layout="wide")
 # =========================
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
 GID_FORM = "1283870792"  # aba com o formulário operacional
-# Corrigido: use &gid= (não &amp;gid=)
+# Corrigido: use &gid= (não &amp;amp;gid=)
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_FORM}"
 
 # -------------------------
@@ -197,9 +197,11 @@ with st.sidebar.expander("📝 Rótulos das Cartas (visual)", expanded=False):
 # =========================
 # PADRONIZAÇÃO DE NOMES (TÍTULOS)
 # =========================
+
 def re_replace_case_insensitive(s, pattern, repl):
     import re
     return re.sub(pattern, repl, s, flags=re.IGNORECASE)
+
 
 def _nome_exibicao(label_original: str) -> str:
     """
@@ -274,17 +276,12 @@ def semaforo_numeric_color(label: str, val: float):
 
     base = _strip_accents(label.lower())
 
-    # -------- Oxigenação (DO) --------
+    # -------- Oxigenação (DO) — faixa fixa 1 a 5 mg/L --------
     if "oxigenacao" in base:
-        area = "nitr" if any(k in base for k in KW_NITR) else ("mbbr" if any(k in base for k in KW_MBBR) else "nitr")
-        cfg = SEMAFORO_CFG["do"][area]
-        ok_min, ok_max = cfg["ok_min"], cfg["ok_max"]
-        red_low, red_high = cfg["red_low"], cfg["red_high"]
-        if val < red_low or val > red_high:
-            return COLOR_BAD
-        if ok_min <= val <= ok_max:
+        if 1 <= val <= 5:
             return COLOR_OK
-        return COLOR_WARN
+        else:
+            return COLOR_BAD
 
     # -------- pH --------
     if re.search(r"\bph\b", base):
@@ -328,6 +325,7 @@ def semaforo_numeric_color(label: str, val: float):
 # =========================
 # GAUGES (somente Caçambas)
 # =========================
+
 def make_speedometer(val, label):
     nome_exibicao = _nome_exibicao(label)
     if val is None or np.isnan(val):
@@ -378,6 +376,7 @@ def render_cacambas_gauges(title, n_cols=4):
 # =========================
 # TILES (cards genéricos com semáforo)
 # =========================
+
 def _tile_color_and_text(raw_value, val_num, label, force_neutral_numeric=False):
     """Define cor e texto do card conforme tipo de dado + semáforo configurável."""
     if raw_value is None:
@@ -393,6 +392,14 @@ def _tile_color_and_text(raw_value, val_num, label, force_neutral_numeric=False)
     # 2) Numérico
     if not np.isnan(val_num):
         units = _units_from_label(label)
+        base = _strip_accents(label.lower())
+
+        # ---- Vazão (0 a 200 m³/h) – regra fixa independente de force_neutral_numeric ----
+        if "vazao" in base or "vazão" in base:
+            if 0 <= val_num <= 200:
+                return COLOR_OK, f"{val_num:.0f} m³/h"
+            else:
+                return COLOR_BAD, f"{val_num:.0f} m³/h"
 
         # Semáforo dedicado por regra
         color_by_rule = None if force_neutral_numeric else semaforo_numeric_color(label, val_num)
@@ -452,6 +459,7 @@ def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=Fa
     st.subheader(title)
     st.plotly_chart(fig, use_container_width=True, key=f"plot-tiles-{_slug(title)}")
 
+
 def render_tiles_split(title_base, base_keywords, n_cols=4, exclude_generic=True):
     """Cards: Nitrificação e MBBR para Válvulas/Sopradores/Oxigenação — com interseção e exclusão."""
     excl = KW_EXCLUDE_GENERIC if exclude_generic else []
@@ -470,6 +478,7 @@ def render_tiles_split(title_base, base_keywords, n_cols=4, exclude_generic=True
 # -------------------------
 # Grupos adicionais
 # -------------------------
+
 def render_outros_niveis():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_NIVEIS_OUTROS)
     cols = [c for c in cols if not any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
@@ -477,11 +486,13 @@ def render_outros_niveis():
         return
     _render_tiles_from_cols("Níveis (MAB/TQ de Lodo)", cols, n_cols=3, force_neutral_numeric=False)
 
+
 def render_vazoes():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_VAZAO)
     if not cols:
         return
     _render_tiles_from_cols("Vazões", cols, n_cols=3, force_neutral_numeric=True)
+
 
 def render_ph():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_PH)
@@ -489,17 +500,20 @@ def render_ph():
         return
     _render_tiles_from_cols("pH", cols, n_cols=4, force_neutral_numeric=False)
 
+
 def render_sst():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_SST)
     if not cols:
         return
     _render_tiles_from_cols("Sólidos (SS/SST)", cols, n_cols=4, force_neutral_numeric=False)
 
+
 def render_dqo():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_DQO)
     if not cols:
         return
     _render_tiles_from_cols("DQO", cols, n_cols=4, force_neutral_numeric=False)
+
 
 def render_estados():
     cols = _filter_columns_by_keywords(cols_lower_noacc, KW_ESTADOS)
@@ -510,6 +524,7 @@ def render_estados():
 # =========================
 # CABEÇALHO (última medição)
 # =========================
+
 def header_info():
     # tenta achar campos de auditoria
     cand = ["carimbo de data/hora", "data", "operador"]
@@ -531,11 +546,13 @@ def header_info():
 # =========================
 # CARTAS — Funções (rótulos inteligentes)
 # =========================
+
 def cc_fmt_brl(v, pos=None):
     try:
         return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
     except:
         return v
+
 
 def cc_fmt_brl_compacto(v: float) -> str:
     """Formata R$ de forma compacta (1.200 -> 1,2 mil; 1.200.000 -> 1,2 mi)."""
@@ -551,6 +568,7 @@ def cc_fmt_brl_compacto(v: float) -> str:
         return f"{sinal}R$ {n/1_000:.1f} mil".replace(".", ",")
     return (sinal + "R$ " + f"{n:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
 
+
 def _indices_extremos_locais(y: pd.Series) -> set[int]:
     """Encontra picos e vales simples (comparando com vizinhos imediatos)."""
     idxs = set()
@@ -565,6 +583,7 @@ def _indices_extremos_locais(y: pd.Series) -> set[int]:
         if ys[i] < ys[i-1] and ys[i] < ys[i+1]:
             idxs.add(y.index[i])
     return idxs
+
 
 def _selecionar_indices_para_rotulo(x: pd.Series, y: pd.Series,
                                     LSC: float, LIC: float,
@@ -610,6 +629,7 @@ def _selecionar_indices_para_rotulo(x: pd.Series, y: pd.Series,
         candidatos.extend(resto)
 
     return sorted(set(candidatos), key=lambda i: x.loc[i])
+
 
 def cc_desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
     """
@@ -907,6 +927,7 @@ def cc_ultimo_valido_positivo(ser: pd.Series) -> float:
         return float(nz.iloc[-1])
     return float(s.iloc[-1])
 
+
 def cc_metricas_item(df_item: pd.DataFrame):
     ultimo = cc_ultimo_valido_positivo(df_item["CUSTO"])
     mask_nz = df_item["CUSTO"].fillna(0) != 0
@@ -927,6 +948,7 @@ def cc_metricas_item(df_item: pd.DataFrame):
     custo_mes = df_tmp[(df_tmp["__mes__"] == ult_mes) & (df_tmp["__ano__"] == ult_ano2)]["CUSTO"].sum()
 
     return ultimo, custo_semana, custo_mes
+
 
 cc_tabs = st.tabs([it["label"] for it in cc_items])
 for tab, it in zip(cc_tabs, cc_items):
@@ -976,9 +998,11 @@ for tab, it in zip(cc_tabs, cc_items):
 # ------------------------------------------------------------
 # 7) RESUMO TEXTO — Sopradores (para WhatsApp/Relatório)
 # ------------------------------------------------------------
+
 def _col_matches_any(cnorm: str, kws):
     kws_norm = [_strip_accents(k.lower()) for k in kws]
     return any(k in cnorm for k in kws_norm)
+
 
 def _select_soprador_cols(df_cols_norm, area_keywords):
     sel = []
@@ -990,6 +1014,7 @@ def _select_soprador_cols(df_cols_norm, area_keywords):
             sel.append(c_norm)
     return [COLMAP[c] for c in sel]
 
+
 def _parse_status_ok_nok(raw):
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
         return "—"
@@ -1000,9 +1025,11 @@ def _parse_status_ok_nok(raw):
         return "NOK"
     return "—"
 
+
 def _extract_first_int(text: str) -> int | None:
     m = re.search(r"\d+", _strip_accents(text.lower()))
     return int(m.group()) if m else None
+
 
 def _coletar_status_area(df, area_keywords):
     cols_area = _select_soprador_cols(cols_lower_noacc, area_keywords)
@@ -1015,6 +1042,7 @@ def _coletar_status_area(df, area_keywords):
     itens.sort(key=lambda x: (9999 if x[0] is None else x[0], _strip_accents(x[2].lower())))
     pares = [f"{num} ({stt})" for num, stt, _ in itens if num is not None]
     return pares
+
 
 def gerar_resumo_sopradores(df):
     mbbr_linha = _coletar_status_area(df, KW_MBBR)
