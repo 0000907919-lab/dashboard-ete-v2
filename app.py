@@ -64,7 +64,17 @@ KW_EXCLUDE_GENERIC = KW_SST + KW_DQO + KW_PH + KW_VAZAO + KW_NIVEIS_OUTROS + KW_
 # Conversões e utilidades
 # -------------------------
 def to_float_ptbr(x):
-    """Converte string PT-BR (%, vírgula) para float."""
+    """Converte string PT-BR (%, vírgula) para float. Aceita escalar ou Series/DataFrame/list."""
+    # Se vier Series/DataFrame/array por engano, tenta extrair um escalar útil
+    if isinstance(x, pd.Series):
+        xx = x.dropna()
+        x = xx.iloc[-1] if not xx.empty else np.nan
+    elif isinstance(x, pd.DataFrame):
+        xx = x.stack().dropna()
+        x = xx.iloc[-1] if not xx.empty else np.nan
+    elif isinstance(x, (list, tuple, np.ndarray)):
+        x = x[-1] if len(x) else np.nan
+
     if pd.isna(x):
         return np.nan
     s = str(x).strip().replace("%", "")
@@ -79,8 +89,17 @@ def to_float_ptbr(x):
         return np.nan
 
 def last_valid_raw(df_local, col):
-    """Último valor não vazio de uma coluna."""
-    s = df_local[col].replace(r"^\s*$", np.nan, regex=True)
+    """Retorna o último valor não vazio de uma coluna,
+    tratando o caso de cabeçalhos duplicados (DataFrame) ao
+    escolher a coluna mais à direita.
+    """
+    obj = df_local[col]
+    # Se houver colunas duplicadas com o mesmo nome, obj será um DataFrame.
+    if isinstance(obj, pd.DataFrame):
+        s = obj.iloc[:, -1]  # prefere a última coluna (mais à direita)
+    else:
+        s = obj
+    s = s.replace(r"^\s*$", np.nan, regex=True)
     valid = s.dropna()
     if valid.empty:
         return None
