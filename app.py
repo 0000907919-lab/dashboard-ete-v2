@@ -460,6 +460,13 @@ def _render_tiles_from_cols(title, cols_orig, n_cols=4, force_neutral_numeric=Fa
         st.info(f"Nenhum item encontrado para: {title}")
         return
 
+    # Filtra antecipadamente colunas sem nenhum dado válido
+    cols_orig = [c for c in cols_orig if last_valid_raw(df, c) not in (None, "")]
+
+    if not cols_orig:
+        st.info(f"Nenhum item encontrado para: {title}")
+        return
+
     fig = go.Figure()
     n_rows = int(np.ceil(len(cols_orig) / n_cols))
     fig.update_xaxes(visible=False, range=[0, n_cols])
