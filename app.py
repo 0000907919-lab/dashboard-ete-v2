@@ -1,4 +1,4 @@
- # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -18,7 +18,7 @@ st.set_page_config(page_title="Dashboard Operacional ETE", layout="wide")
 # =========================
 SHEET_ID = "1Gv0jhdQLaGkzuzDXWNkD0GD5OMM84Q_zkOkQHGBhLjU"
 GID_FORM = "1283870792"  # aba com o formulário operacional
-# Corrigido: use &gid= (não &amp;gid=)
+# Corrigido: use &gid= (não &gid=)
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID_FORM}"
 
 # -------------------------
@@ -362,35 +362,29 @@ def make_speedometer(val, label):
     )
 
 def render_cacambas_gauges(title, n_cols=4):
-    cols_orig = _filter_columns_by_keywords(cols_lower_noacc, KW_CACAMBA)
-    cols_orig = [c for c in cols_orig if any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
-    cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
-
-    if not cols_orig:
+    cols = []
+    for col in df.columns:
+        base = _strip_accents(col.lower())
+        if "cacamba" in base:
+            cols.append(col)
+    cols = sorted(cols, key=lambda x: _nome_exibicao(x))
+    if not cols:
         st.info("Nenhuma caçamba encontrada.")
         return
-
-    n_rows = int(np.ceil(len(cols_orig) / n_cols))
-    fig = make_subplots(
-        rows=n_rows,
-        cols=n_cols,
-        specs=[[{"type": "indicator"}] * n_cols for _ in range(n_rows)],
-        horizontal_spacing=0.05,
-        vertical_spacing=0.15
-    )
-
-    for i, c in enumerate(cols_orig):
-        raw = last_valid_raw(df, c)
+    import numpy as np
+    n_rows = int(np.ceil(len(cols) / n_cols))
+    fig = make_subplots(rows=n_rows, cols=n_cols,
+                        specs=[[{"type": "indicator"}] * n_cols for _ in range(n_rows)],
+                        horizontal_spacing=0.05, vertical_spacing=0.15)
+    for i, col in enumerate(cols):
+        raw = last_valid_raw(df, col)
         val = to_float_ptbr(raw)
         r = i // n_cols + 1
-        cc = i % n_cols + 1
-        fig.add_trace(make_speedometer(val, c), row=r, col=cc)
-
-    fig.update_layout(
-        height=max(280 * n_rows, 280),
-        margin=dict(l=10, r=10, t=10, b=10),
-    )
-    st.plotly_chart(fig, use_container_width=True, key=f"plot-gauges-{_slug(title)}")
+        c = i % n_cols + 1
+        fig.add_trace(make_speedometer(val, col), r, c)
+    fig.update_layout(height=max(300 * n_rows, 300), margin=dict(l=10, r=10, t=10, b=10))
+    st.subheader(title)
+    st.plotly_chart(fig, use_container_width=True, key=f"gauge-{_slug(title)}")(fig, use_container_width=True, key=f"plot-gauges-{_slug(title)}")
 
 # =========================
 # TILES (cards genéricos com semáforo)
