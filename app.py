@@ -369,11 +369,13 @@ def render_cacambas_gauges(title, n_cols=4):
     mesmo que tenha 'caçamba' com cedilha — é normalizada antes da comparação,
     garantindo que sensores sem essa palavra jamais apareçam aqui.
     """
-    # Filtro estrito: normaliza cada coluna e verifica presença literal de 'cacamba'
+    # Filtro estrito: itera diretamente sobre df.columns (nomes originais),
+    # normaliza cada um na hora e exige 'cacamba' explicitamente.
+    # Isso evita qualquer colisão de COLMAP e garante que SOMENTE colunas
+    # com a palavra 'cacamba' / 'caçamba' virem gauge.
     cols_orig = [
-        COLMAP[c_norm]
-        for c_norm in cols_lower_noacc
-        if "cacamba" in c_norm          # _strip_accents já foi aplicado em cols_lower_noacc
+        col for col in df.columns
+        if "cacamba" in _strip_accents(col.lower())
     ]
     cols_orig = sorted(set(cols_orig), key=lambda x: _nome_exibicao(x))
 
