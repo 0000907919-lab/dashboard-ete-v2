@@ -1,4 +1,4 @@
- # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -342,7 +342,7 @@ def semaforo_numeric_color(label: str, val: float):
     return None
 
 # =========================
-# GAUGES (somente Caçambas)
+# GAUGES — SOMENTE colunas com "cacamba" no nome (sem acento)
 # =========================
 
 def make_speedometer(val, label):
@@ -361,10 +361,21 @@ def make_speedometer(val, label):
         domain={"x": [0, 1], "y": [0, 1]},
     )
 
+
 def render_cacambas_gauges(title, n_cols=4):
-    cols_orig = _filter_columns_by_keywords(cols_lower_noacc, KW_CACAMBA)
-    cols_orig = [c for c in cols_orig if any(k in _strip_accents(c.lower()) for k in KW_CACAMBA)]
-    cols_orig = sorted(cols_orig, key=lambda x: _nome_exibicao(x))
+    """
+    Renderiza SOMENTE as colunas cujo nome contém 'cacamba' (sem acento,
+    case-insensitive) como velocímetros (gauge). Qualquer outra coluna —
+    mesmo que tenha 'caçamba' com cedilha — é normalizada antes da comparação,
+    garantindo que sensores sem essa palavra jamais apareçam aqui.
+    """
+    # Filtro estrito: normaliza cada coluna e verifica presença literal de 'cacamba'
+    cols_orig = [
+        COLMAP[c_norm]
+        for c_norm in cols_lower_noacc
+        if "cacamba" in c_norm          # _strip_accents já foi aplicado em cols_lower_noacc
+    ]
+    cols_orig = sorted(set(cols_orig), key=lambda x: _nome_exibicao(x))
 
     if not cols_orig:
         st.info("Nenhuma caçamba encontrada.")
