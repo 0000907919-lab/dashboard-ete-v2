@@ -362,28 +362,55 @@ def make_speedometer(val, label):
     )
 
 
+def _cacamba_valor_radio(numero: int) -> float:
+    """
+    O Google Forms cria uma coluna por opcao de % para cada cacamba
+    (ex: 'Cacamba 1 [1%]', 'Cacamba 1 [2%]', ...).
+    Encontra todas as colunas da cacamba numero, olha a ultima linha
+    preenchida e retorna o valor percentual da opcao marcada.
+    """
+    padrao = _strip_accents(f"cacamba {numero}").lower()
+    cols_desta = [
+        col for col in df.columns
+        if padrao in _strip_accents(col.lower())
+    ]
+    if not cols_desta:
+        return np.nan
+
+    for idx in range(len(df) - 1, -1, -1):
+        row = df.iloc[idx]
+        for col in cols_desta:
+            v = str(row[col]).strip()
+            if v and v.lower() not in ("nan", ""):
+                m = re.search(r"(\d+)\s*%", col)
+                if m:
+                    return float(m.group(1))
+                m2 = re.search(r"(\d+)", v)
+                if m2:
+                    return float(m2.group(1))
+    return np.nan
+
+
 def render_cacambas_gauges(title, n_cols=4):
     """
-    Renderiza SOMENTE as colunas cujo nome contém 'cacamba' (sem acento,
-    case-insensitive) como velocímetros (gauge). Qualquer outra coluna —
-    mesmo que tenha 'caçamba' com cedilha — é normalizada antes da comparação,
-    garantindo que sensores sem essa palavra jamais apareçam aqui.
+    Mostra EXATAMENTE um gauge por cacamba numerada (1, 2, 3...).
+    Consolida as colunas de radio button do Google Forms em um unico valor.
     """
-    # Filtro estrito: itera diretamente sobre df.columns (nomes originais),
-    # normaliza cada um na hora e exige 'cacamba' explicitamente.
-    # Isso evita qualquer colisão de COLMAP e garante que SOMENTE colunas
-    # com a palavra 'cacamba' / 'caçamba' virem gauge.
-    cols_orig = [
-        col for col in df.columns
-        if "cacamba" in _strip_accents(col.lower())
-    ]
-    cols_orig = sorted(set(cols_orig), key=lambda x: _nome_exibicao(x))
+    numeros = set()
+    for col in df.columns:
+        col_norm = _strip_accents(col.lower())
+        if "cacamba" in col_norm:
+            m = re.search(r"cacamba\s*(\d+)", col_norm)
+            if m:
+                numeros.add(int(m.group(1)))
 
-    if not cols_orig:
-        st.info("Nenhuma caçamba encontrada.")
+    cacambas = sorted(numeros)
+
+    if not cacambas:
+        st.info("Nenhuma cacamba encontrada.")
         return
 
-    n_rows = int(np.ceil(len(cols_orig) / n_cols))
+    n_rows = int(np.ceil(len(cacambas) / n_cols))
     fig = make_subplots(
         rows=n_rows,
         cols=n_cols,
@@ -392,12 +419,12 @@ def render_cacambas_gauges(title, n_cols=4):
         vertical_spacing=0.15
     )
 
-    for i, c in enumerate(cols_orig):
-        raw = last_valid_raw(df, c)
-        val = to_float_ptbr(raw)
+    for i, num in enumerate(cacambas):
+        val = _cacamba_valor_radio(num)
+        label = f"Nivel da cacamba {num}"
         r = i // n_cols + 1
         cc = i % n_cols + 1
-        fig.add_trace(make_speedometer(val, c), row=r, col=cc)
+        fig.add_trace(make_speedometer(val, label), row=r, col=cc)
 
     fig.update_layout(
         height=max(280 * n_rows, 280),
