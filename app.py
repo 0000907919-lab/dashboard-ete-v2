@@ -591,9 +591,36 @@ def render_estados():
 # CABEÇALHO (última medição)
 # =========================
 
+def _operador_valor_radio() -> str:
+    """
+    O Forms gera uma coluna por nome de operador (ex: 'Operador [Bruce]').
+    Percorre a ultima linha preenchida e retorna o nome do operador marcado.
+    """
+    cols_op = [
+        col for col in df.columns
+        if "operador" in _strip_accents(col.lower()) or "operardor" in _strip_accents(col.lower())
+    ]
+    if not cols_op:
+        return "—"
+
+    for idx in range(len(df) - 1, -1, -1):
+        row = df.iloc[idx]
+        for col in cols_op:
+            v = str(row[col]).strip()
+            if v and v.lower() not in ("nan", ""):
+                # Tenta extrair nome do colchete: 'Operador [Bruce]' -> 'Bruce'
+                import re as _re
+                m = _re.search(r"\[(.+?)\]", col)
+                if m:
+                    return m.group(1).strip()
+                # Se nao tiver colchete, retorna o proprio valor
+                return v
+    return "—"
+
+
 def header_info():
     # tenta achar campos de auditoria
-    cand = ["carimbo de data/hora", "data", "operador"]
+    cand = ["carimbo de data/hora", "data"]
     found = {}
     for c in df.columns:
         k = _strip_accents(c.lower())
@@ -605,8 +632,7 @@ def header_info():
         col0.metric("Último carimbo", str(last_valid_raw(df, found["carimbo de data/hora"])))
     elif "data" in found:
         col0.metric("Data", str(last_valid_raw(df, found["data"])))
-    if "operador" in found:
-        col1.metric("Operador", str(last_valid_raw(df, found["operador"])))
+    col1.metric("Operador", _operador_valor_radio())
     col2.metric("Registros", f"{len(df)} linhas")
 
 # =========================
