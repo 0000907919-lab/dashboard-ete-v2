@@ -768,27 +768,59 @@ def cc_desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
             incluir_primeiro_ultimo=cc_lbl_show_first_last,
         )
 
+        # Remove zeros da lista de rótulos — evita amontoamento em séries com muitos R$0
+        idx_rotulos = [i for i in idx_rotulos if not (pd.notna(y.loc[i]) and y.loc[i] == 0)]
+
         def _fmt(v):
             if cc_lbl_compact_format:
                 return cc_fmt_brl_compacto(v)
             else:
                 return ("R$ " + f"{v:,.0f}").replace(",", "X").replace(".", ",").replace("X", ".")
 
-        offsets = []
-        base_offset = 8  # px
-        for k, _ in enumerate(idx_rotulos):
-            sign = 1 if (k % 2 == 0) else -1
-            step = base_offset + 2 * (k // 4)
-            offsets.append(sign * step)
+        # Converte índices para posições numéricas no eixo X para calcular distância
+        x_series = pd.Series(x).reset_index(drop=True)
+        x_num = pd.to_numeric(pd.to_datetime(x_series, errors="coerce"), errors="coerce")
 
         bbox = dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.7) if cc_lbl_bbox else None
 
-        for (idx, dy) in zip(idx_rotulos, offsets):
+        # Offsets verticais: alterna cima/baixo com amplitude crescente
+        # para pontos próximos no eixo X (evita sobreposição)
+        OFFSET_BASE = 18
+        OFFSET_STEP = 14
+        prev_x_num = None
+        acum = 0  # acumulador de proximidade para aumentar offset
+        sinal = 1
+
+        for k, idx in enumerate(idx_rotulos):
             if pd.isna(y.loc[idx]):
                 continue
+
+            # Calcula posição X numérica deste ponto
+            try:
+                pos_idx = list(y.index).index(idx)
+                curr_x_num = x_num.iloc[pos_idx] if pos_idx < len(x_num) else None
+            except Exception:
+                curr_x_num = None
+
+            # Se está muito próximo do anterior, aumenta o offset
+            if prev_x_num is not None and curr_x_num is not None:
+                diff = abs(curr_x_num - prev_x_num)
+                total_range = x_num.max() - x_num.min() if x_num.max() != x_num.min() else 1
+                proporcao = diff / total_range
+                if proporcao < 0.04:   # pontos muito próximos (< 4% do range)
+                    acum += 1
+                else:
+                    acum = 0
+            else:
+                acum = 0
+
+            dy = sinal * (OFFSET_BASE + acum * OFFSET_STEP)
+            sinal *= -1  # alterna cima/baixo
+            prev_x_num = curr_x_num
+
             ax.annotate(
                 _fmt(y.loc[idx]),
-                (x.loc[idx], y.loc[idx]),
+                (x.loc[idx] if hasattr(x, "loc") else pd.Series(x).iloc[list(y.index).index(idx)], y.loc[idx]),
                 textcoords="offset points",
                 xytext=(0, dy),
                 ha="center",
@@ -796,6 +828,7 @@ def cc_desenhar_carta(x, y, titulo, ylabel, mostrar_rotulos=True):
                 rotation=cc_lbl_angle,
                 bbox=bbox,
                 color="#0D47A1",
+                arrowprops=dict(arrowstyle="-", color="#90CAF9", lw=0.8) if abs(dy) > OFFSET_BASE else None,
             )
 
     ax.set_title(titulo)
