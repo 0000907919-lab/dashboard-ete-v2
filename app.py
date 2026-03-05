@@ -41,21 +41,23 @@ def _slug(s: str) -> str:
 cols_lower_noacc = [_strip_accents(c.lower()) for c in df.columns]
 COLMAP = dict(zip(cols_lower_noacc, df.columns))  # normalizado -> original
 
-# Palavras‑chave
+# Palavras‑chave — refletem os nomes reais do Google Forms
 KW_CACAMBA   = ["cacamba", "caçamba"]
-KW_NITR      = ["nitr", "nitrificacao", "nitrificação"]
+KW_NITR      = ["nitrificacao", "nitrificação", "nitrificac"]
 KW_MBBR      = ["mbbr"]
+# Válvulas: no Forms são "Válvula Inferior Tq. MBBR1/2" — sem "nitrificação"
 KW_VALVULA   = ["valvula", "válvula"]
-KW_SOPRADOR  = ["soprador"]                         # SOMENTE sopradores (status)
-KW_OXIG      = ["oxigenacao", "oxigenação"]         # Oxigenação/DO
+KW_SOPRADOR  = ["soprador"]
+# Oxigenação: no Forms são "Oxigenação MBBR1/2" e "Oxigenação 1/2 Nitrificação"
+KW_OXIG      = ["oxigenacao", "oxigenação"]
 
 # Grupos adicionais
-KW_NIVEIS_OUTROS = ["nivel", "nível"]      # será filtrado excluindo caçamba
+KW_NIVEIS_OUTROS = ["nivel", "nível"]
 KW_VAZAO         = ["vazao", "vazão"]
-KW_PH            = ["ph ", " ph"]          # espaços p/ evitar bater em 'oxipH' etc
-KW_SST           = ["sst ", " sst", "ss "]  # inclui SS/SST
+KW_PH            = ["ph "]
+KW_SST           = ["sst ", " sst", "ss "]
 KW_DQO           = ["dqo ", " dqo"]
-KW_ESTADOS       = ["tridecanter", "desvio", "tempo de descarte", "volante"]
+KW_ESTADOS       = ["decanter", "desvio", "tempo de desc", "volante"]
 
 # Exclusões genéricas para não poluir cartões
 KW_EXCLUDE_GENERIC = KW_SST + KW_DQO + KW_PH + KW_VAZAO + KW_NIVEIS_OUTROS + KW_CACAMBA
@@ -812,14 +814,107 @@ header_info()
 # Caçambas (gauge)
 render_cacambas_gauges("Caçambas")
 
-# Válvulas (cards) — Nitrificação e MBBR
-render_tiles_split("Válvulas", KW_VALVULA)
+# Válvulas — no Forms: "Válvula Inferior Tq. MBBR1/2" (somente MBBR, sem nitrificação)
+cols_valvulas = [col for col in df.columns if "valvula" in _strip_accents(col.lower()) or "válvula" in col.lower()]
+cols_valvulas = [c for c in cols_valvulas if last_valid_raw(df, c) not in (None, "")]
+if cols_valvulas:
+    _render_tiles_from_cols("Válvulas – MBBR", cols_valvulas, n_cols=4)
 
-# Sopradores (cards) — mostrar somente SOPRADORES (sem DO)
-render_tiles_split("Sopradores", KW_SOPRADOR)
+# Sopradores — no Forms: "Sopradores MBBR" e "Sopradores Nitrificação" com radio por soprador
+def _render_sopradores_radio(titulo, kw_area):
+    """Sopradores do Forms: pergunta-mãe tem OK/NOK/OF e sub-colunas por número de soprador."""
+    # Pega colunas cuja pergunta-mãe é o grupo (ex: "Sopradores MBBR [Soprador 1]")
+    cols = []
+    for col in df.columns:
+        cn = _strip_accents(col.lower())
+        has_sop = "soprador" in cn
+        has_area = any(_strip_accents(k.lower()) in cn for k in kw_area)
+        has_oxig = "oxigenac" in cn
+        if has_sop and has_area and not has_oxig:
+            cols.append(col)
+    cols = [c for c in cols if last_valid_raw(df, c) not in (None, "")]
+    if cols:
+        _render_tiles_from_cols(titulo, cols, n_cols=4)
 
-# Oxigenação (cards) — DO separado dos sopradores (com semáforo pelos limites da sidebar)
-render_tiles_split("Oxigenação", KW_OXIG, n_cols=4, exclude_generic=False)
+_render_sopradores_radio("Sopradores – MBBR", KW_MBBR)
+_render_sopradores_radio("Sopradores – Nitrificação", KW_NITR)
+
+# Oxigenação — no Forms: "Oxigenação MBBR1/2" e "Oxigenação 1/2 Nitrificação" (radio 1-10)
+def _render_oxigenacao_radio(titulo, kw_area):
+    """Lê colunas de oxigenação (radio 1-10) e consolida por sensor."""
+    # Agrupa colunas por sensor (nome sem o valor do radio)
+    import re as _re
+    grupos = {}  # nome_sensor -> lista de colunas
+    for col in df.columns:
+        cn = _strip_accents(col.lower())
+        if "oxigenac" not in cn:
+            continue
+        has_area = any(_strip_accents(k.lower()) in cn for k in kw_area)
+        if not has_area:
+            continue
+        # Remove valor entre colchetes para agrupar: "Oxigenação MBBR1 [5]" -> "Oxigenação MBBR1"
+        nome_base = _re.sub(r"\s*\[.*?\]", "", col).strip()
+        if nome_base not in grupos:
+            grupos[nome_base] = []
+        grupos[nome_base].append(col)
+
+    if not grupos:
+        return
+
+    # Para cada sensor, acha o valor marcado na última linha
+    itens_com_valor = []
+    for nome_base, cols_grupo in grupos.items():
+        for idx in range(len(df) - 1, -1, -1):
+            row = df.iloc[idx]
+            for col in cols_grupo:
+                v = str(row[col]).strip()
+                if v and v.lower() not in ("nan", ""):
+                    # Tenta extrair número do colchete
+                    m = _re.search(r"\[(\d+)\]", col)
+                    val = float(m.group(1)) if m else None
+                    if val is None:
+                        try:
+                            val = float(v)
+                        except:
+                            val = None
+                    if val is not None:
+                        itens_com_valor.append((nome_base, val))
+                    break
+            else:
+                continue
+            break
+
+    if not itens_com_valor:
+        return
+
+    # Renderiza como tiles
+    fig = go.Figure()
+    n_cols = 4
+    n_rows = int(np.ceil(len(itens_com_valor) / n_cols))
+    fig.update_xaxes(visible=False, range=[0, n_cols])
+    fig.update_yaxes(visible=False, range=[0, n_rows])
+
+    for i, (nome, val) in enumerate(itens_com_valor):
+        color = COLOR_OK if 1 <= val <= 5 else COLOR_BAD
+        r = i // n_cols
+        cc = i % n_cols
+        x0, x1 = cc + 0.05, cc + 0.95
+        y0, y1 = (n_rows - 1 - r) + 0.05, (n_rows - 1 - r) + 0.95
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
+                      fillcolor=color, line=dict(color="white", width=1))
+        fig.add_annotation(x=(x0+x1)/2, y=(y0+y1)/2+0.15,
+                           text=f"<b style='font-size:18px'>{val:.0f} mg/L</b>",
+                           showarrow=False, font=dict(color="white"))
+        fig.add_annotation(x=(x0+x1)/2, y=(y0+y1)/2-0.15,
+                           text=f"<span style='font-size:12px'>{nome}</span>",
+                           showarrow=False, font=dict(color="white"))
+
+    fig.update_layout(height=max(170 * n_rows, 170), margin=dict(l=10, r=10, t=10, b=10))
+    st.subheader(titulo)
+    st.plotly_chart(fig, use_container_width=True, key=f"plot-oxig-{_slug(titulo)}")
+
+_render_oxigenacao_radio("Oxigenação – MBBR", KW_MBBR)
+_render_oxigenacao_radio("Oxigenação – Nitrificação", KW_NITR)
 
 # ---- Indicadores adicionais
 render_outros_niveis()
